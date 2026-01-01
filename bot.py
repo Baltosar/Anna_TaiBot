@@ -105,8 +105,8 @@ if not link:
     await message.answer(
             "❌ Это время уже занято.\n"
             "Пожалуйста, выберите другое ⏰"
-        )
-        return
+    )
+    return
 
 await message.answer(
         f"✅ Клиент записан!\n\n"
