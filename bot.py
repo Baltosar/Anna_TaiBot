@@ -113,7 +113,7 @@ async def book_time(message: Message, state: FSMContext):
         f"🔗 Ссылка на событие:\n{link}"
     )
 
-    await state.clear()A
+    await state.clear()
 
 # ====== CLIENT → ADMIN ======
 @dp.message(lambda m: m.text == "👩‍💼 Администратор")
