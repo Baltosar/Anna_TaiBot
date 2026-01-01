@@ -1,2 +1,8 @@
-# Google Service Account keys
+# Secrets
 *.json
+credentials.json
+
+# Python
+__pycache__/
+.env
+.venv
