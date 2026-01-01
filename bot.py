@@ -213,7 +213,7 @@ async def handle_message(message: types.Message, state: FSMContext):
     history = user_memory.get(message.chat.id, [])
     history.append({"role": "user", "content": message.text})
 
-reply = await ai_reply(history)
+    reply = await ai_reply(history)
 
 # 🔥 ЕСЛИ AI ПОНЯЛ, ЧТО ЭТО ЗАПИСЬ
 if "INTENT:BOOKING" in reply:
