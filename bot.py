@@ -220,13 +220,14 @@ async def handle_message(message: types.Message, state: FSMContext):
     # 🔥 ЕСЛИ AI ПОНЯЛ, ЧТО ЭТО ЗАПИСЬ
     if "INTENT:BOOKING" in reply:
         await message.answer(
-            "Отлично 👍 Давайте оформим запись.\n\n"
-            "Введите дату (например: 2026-01-03)"
+        "Отлично 👍 Я помогу вас записать.\n\n"
+        "Как вас зовут?"
         )
 
-        # 👉 переводим пользователя в FSM
-        await state.set_state(BookingState.date)
+         # 🔥 ПРАВИЛЬНО: начинаем FSM С НАЧАЛА
+        await state.set_state(BookingState.name)
         return
+
 
     # 🔹 обычный AI-ответ
     history.append({"role": "assistant", "content": reply})
