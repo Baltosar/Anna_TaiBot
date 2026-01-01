@@ -216,7 +216,17 @@ async def handle_message(message: types.Message, state: FSMContext):
     history.append({"role": "user", "content": message.text})
 
     # AI-ответ
-    reply = await ai_reply(history)
+    try:
+        reply = await ai_reply(history)
+    except Exception as e:
+        if "rate limit" in str(e).lower() or "429" in str(e):
+            await message.answer(
+               "⏳ Я сейчас немного перегружен.\n"
+               "Пожалуйста, подождите 20 секунд и напишите ещё раз 🙏"
+            )
+            return
+        else:
+            raise e
 
     # 🔥 ЕСЛИ AI ПОНЯЛ, ЧТО НУЖНА ЗАПИСЬ
     if "INTENT:BOOKING" in reply:
