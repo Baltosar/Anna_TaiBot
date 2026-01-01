@@ -5,15 +5,11 @@ from datetime import datetime, timedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
-CALENDAR_ID = "calendar-bot@anntaibotcalendar.iam.gserviceaccount.com"
-
 # ====== GOOGLE CREDENTIALS ======
 credentials_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-
 if not credentials_json:
     raise RuntimeError("GOOGLE_CREDENTIALS_JSON is not set")
 
-# ВАЖНО: json.loads — ТОЛЬКО ОДИН РАЗ
 credentials_info = json.loads(credentials_json)
 
 credentials = service_account.Credentials.from_service_account_info(
@@ -23,16 +19,13 @@ credentials = service_account.Credentials.from_service_account_info(
 
 service = build("calendar", "v3", credentials=credentials)
 
-# ID календаря (обычно email сервисного аккаунта или 'primary')
-CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
+# ✅ ВАЖНО: ID ТВОЕГО календаря
+CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID")
+if not CALENDAR_ID:
+    raise RuntimeError("GOOGLE_CALENDAR_ID is not set")
 
 
-# ====== CREATE BOOKING ======
 def create_booking(name, phone, service_name, date, time):
-    """
-    Создаёт событие в Google Calendar
-    """
-
     start_dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
     end_dt = start_dt + timedelta(hours=1)
 
