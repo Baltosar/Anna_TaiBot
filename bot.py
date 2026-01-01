@@ -83,13 +83,19 @@ async def book_service(message: types.Message, state: FSMContext):
     await state.set_state(BookingState.date)
 
 @dp.message(BookingState.date)
+async def book_date(message: Message, state: FSMContext):
+    await state.update_data(date=message.text)
+    await message.answer("Время записи? (например 14:00)")
+    await state.set_state(BookingState.time)
+
+@dp.message(BookingState.time)
 async def book_time(message: Message, state: FSMContext):
     data = await state.get_data()
 
     name = data["name"]
     phone = data["phone"]
     service = data["service"]
-    date = data["date"]
+    date = data["date"]      # теперь точно есть
     time = message.text
 
     link = create_booking(
@@ -114,6 +120,7 @@ async def book_time(message: Message, state: FSMContext):
     )
 
     await state.clear()
+
 
 # ====== CLIENT → ADMIN ======
 @dp.message(lambda m: m.text == "👩‍💼 Администратор")
