@@ -83,39 +83,37 @@ async def book_service(message: types.Message, state: FSMContext):
     await state.set_state(BookingState.date)
 
 @dp.message(BookingState.date)
-async def book_date(message: types.Message, state: FSMContext):
-    await state.update_data(date=message.text)
-    await message.answer("Время? (ЧЧ:ММ)")
-    await state.set_state(BookingState.time)
-
-@dp.message(BookingState.time)
-async def book_time(message: types.Message, state: FSMContext):
+async def book_time(message: Message, state: FSMContext):
     data = await state.get_data()
 
-link = create_booking(
-    name=name,
-    phone=phone,
-    service_name=service,  # ✅ ВАЖНО: service_name, а не service
-    date=date,
-    time=time
-)
+    name = data["name"]
+    phone = data["phone"]
+    service = data["service"]
+    date = data["date"]
+    time = message.text
 
-
-if not link:
-    await message.answer(
-            "❌ Это время уже занято.\n"
-            "Пожалуйста, выберите другое ⏰"
+    link = create_booking(
+        name=name,
+        phone=phone,
+        service_name=service,
+        date=date,
+        time=time
     )
-    return
 
-await message.answer(
+    if not link:
+        await message.answer(
+            "❌ Это время уже занято. Пожалуйста, выберите другое."
+        )
+        return
+
+    await message.answer(
         f"✅ Клиент записан!\n\n"
         f"📅 Дата: {date}\n"
         f"⏰ Время: {time}\n"
         f"🔗 Ссылка на событие:\n{link}"
     )
 
-await state.clear()
+    await state.clear()
 
 # ====== CLIENT → ADMIN ======
 @dp.message(lambda m: m.text == "👩‍💼 Администратор")
