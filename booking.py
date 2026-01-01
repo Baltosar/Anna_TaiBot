@@ -25,7 +25,7 @@ if not CALENDAR_ID:
     raise RuntimeError("GOOGLE_CALENDAR_ID is not set")
 
 
-def create_booking(name, phone, service, date, time):
+def create_booking(name, phone, service_name, date, time):
     start_dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
     end_dt = start_dt + timedelta(hours=1)
 
@@ -34,11 +34,11 @@ def create_booking(name, phone, service, date, time):
         return None
 
     event = {
-        "summary": f"{service} — {name}",
+        "summary": f"{service_name} — {name}",
         "description": (
             f"Клиент: {name}\n"
             f"Телефон: {phone}\n"
-            f"Услуга: {service}"
+            f"Услуга: {service_name}"
         ),
         "start": {
             "dateTime": start_dt.isoformat(),
