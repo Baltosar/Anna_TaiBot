@@ -203,6 +203,7 @@ async def admin_reply(message: types.Message):
 @dp.message()
 async def handle_message(message: types.Message, state: FSMContext):
 
+    # если диалог передан администратору
     if message.chat.id in handoff_users:
         await bot.send_message(
             ADMIN_CHAT_ID,
@@ -213,26 +214,25 @@ async def handle_message(message: types.Message, state: FSMContext):
     history = user_memory.get(message.chat.id, [])
     history.append({"role": "user", "content": message.text})
 
-
+    # ⚠️ ВАЖНО: await ТОЛЬКО ВНУТРИ async-функции
     reply = await ai_reply(history)
 
+    # 🔥 ЕСЛИ AI ПОНЯЛ, ЧТО ЭТО ЗАПИСЬ
+    if "INTENT:BOOKING" in reply:
+        await message.answer(
+            "Отлично 👍 Давайте оформим запись.\n\n"
+            "Введите дату (например: 2026-01-03)"
+        )
 
-# 🔥 ЕСЛИ AI ПОНЯЛ, ЧТО ЭТО ЗАПИСЬ
-if "INTENT:BOOKING" in reply:
-    await message.answer(
-        "Отлично 👍 Давайте оформим запись.\n\n"
-        "Введите дату (например: 2026-01-03)"
-    )
+        # 👉 переводим пользователя в FSM
+        await state.set_state(BookingState.date)
+        return
 
-    # 🔁 ПЕРЕВОДИМ В FSM /book
-    await state.set_state(BookingState.date)
-    return
+    # 🔹 обычный AI-ответ
+    history.append({"role": "assistant", "content": reply})
+    user_memory[message.chat.id] = history[-10:]
 
-# 🔹 Обычный AI-ответ
-history.append({"role": "assistant", "content": reply})
-user_memory[message.chat.id] = history[-10:]
-
-await message.answer(reply)
+    await message.answer(reply)
 
 
 # ====== START ======
