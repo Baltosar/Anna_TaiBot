@@ -201,7 +201,8 @@ async def admin_reply(message: types.Message):
 
 # ====== AI ======
 @dp.message()
-async def handle_message(message: types.Message):
+async def handle_message(message: types.Message, state: FSMContext):
+
     if message.chat.id in handoff_users:
         await bot.send_message(
             ADMIN_CHAT_ID,
@@ -212,12 +213,25 @@ async def handle_message(message: types.Message):
     history = user_memory.get(message.chat.id, [])
     history.append({"role": "user", "content": message.text})
 
-    reply = await ai_reply(history)
+reply = await ai_reply(history)
 
-    history.append({"role": "assistant", "content": reply})
-    user_memory[message.chat.id] = history[-10:]
+# 🔥 ЕСЛИ AI ПОНЯЛ, ЧТО ЭТО ЗАПИСЬ
+if "INTENT:BOOKING" in reply:
+    await message.answer(
+        "Отлично 👍 Давайте оформим запись.\n\n"
+        "Введите дату (например: 2026-01-03)"
+    )
 
-    await message.answer(reply)
+    # 🔁 ПЕРЕВОДИМ В FSM /book
+    await state.set_state(BookingState.date)
+    return
+
+# 🔹 Обычный AI-ответ
+history.append({"role": "assistant", "content": reply})
+user_memory[message.chat.id] = history[-10:]
+
+await message.answer(reply)
+
 
 # ====== START ======
 async def main():
