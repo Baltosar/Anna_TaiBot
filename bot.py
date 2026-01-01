@@ -101,16 +101,18 @@ link = create_booking(
 )
 
 
-    if not link:
-        await message.answer(
+if not link:
+    await message.answer(
             "❌ Это время уже занято.\n"
             "Пожалуйста, выберите другое ⏰"
         )
         return
 
-    await message.answer(
-        "✅ Вы успешно записаны!\n"
-        f"📅 Ссылка на событие:\n{link}"
+await message.answer(
+        f"✅ Клиент записан!\n\n"
+        f"📅 Дата: {date}\n"
+        f"⏰ Время: {time}\n"
+        f"🔗 Ссылка на событие:\n{link}"
     )
 
     await state.clear()
