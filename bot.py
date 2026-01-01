@@ -115,7 +115,7 @@ await message.answer(
         f"🔗 Ссылка на событие:\n{link}"
     )
 
-    await state.clear()
+await state.clear()
 
 # ====== CLIENT → ADMIN ======
 @dp.message(lambda m: m.text == "👩‍💼 Администратор")
