@@ -1,14 +1,15 @@
 import asyncio
 import os
-from booking import create_booking
+
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from ai import ai_reply
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 
+from ai import ai_reply
+from booking import create_booking
 
 os.environ["AIOMISC_NO_IPV6"] = "1"
 
@@ -26,16 +27,14 @@ ADMIN_CHAT_ID = int(ADMIN_CHAT_ID)
 
 # ====== BOT ======
 bot = Bot(token=BOT_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
-
+dp = Dispatcher(storage=MemoryStorage())
 
 # ====== STATE ======
-user_memory = {}          # история диалога с AI
-handoff_users = set()     # клиенты, переданные администратору
-admin_active_user = None  # выбранный клиент у администратора
+user_memory = {}
+handoff_users = set()
+admin_active_user = None
 
-# ====== BOOKING STATES ======
+# ====== BOOKING FSM ======
 class BookingState(StatesGroup):
     name = State()
     phone = State()
@@ -59,6 +58,7 @@ async def start(message: types.Message):
         reply_markup=admin_kb
     )
 
+# ====== BOOKING FLOW ======
 @dp.message(Command("book"))
 async def book_start(message: types.Message, state: FSMContext):
     await message.answer("Как вас зовут?")
@@ -92,22 +92,27 @@ async def book_date(message: types.Message, state: FSMContext):
 async def book_time(message: types.Message, state: FSMContext):
     data = await state.get_data()
 
-    link = create_booking(...)
-
-if not link:
-    await message.answer(
-        "❌ Это время уже занято.\n"
-        "Пожалуйста, выберите другое время ⏰"
+    link = create_booking(
+        name=data["name"],
+        phone=data["phone"],
+        service=data["service"],
+        date=data["date"],
+        time=message.text
     )
-    return
+
+    if not link:
+        await message.answer(
+            "❌ Это время уже занято.\n"
+            "Пожалуйста, выберите другое ⏰"
+        )
+        return
 
     await message.answer(
-    "✅ Вы успешно записаны!\n"
-    f"📅 Ссылка на событие:\n{link}"
-)
+        "✅ Вы успешно записаны!\n"
+        f"📅 Ссылка на событие:\n{link}"
+    )
 
-
-await state.clear()
+    await state.clear()
 
 # ====== CLIENT → ADMIN ======
 @dp.message(lambda m: m.text == "👩‍💼 Администратор")
@@ -121,12 +126,10 @@ async def admin_button(message: types.Message):
 
     await bot.send_message(
         ADMIN_CHAT_ID,
-        f"📩 Новый клиент\n"
-        f"ID: {message.chat.id}\n"
-        f"Username: @{message.from_user.username}"
+        f"📩 Новый клиент\nID: {message.chat.id}"
     )
 
-# ====== ADMIN: LIST CLIENTS ======
+# ====== ADMIN COMMANDS ======
 @dp.message(Command("clients"))
 async def clients_list(message: types.Message):
     if message.chat.id != ADMIN_CHAT_ID:
@@ -141,27 +144,8 @@ async def clients_list(message: types.Message):
         marker = "👉 " if uid == admin_active_user else ""
         text += f"{marker}{uid}\n"
 
-    text += "\n✏️ Напишите ID клиента, чтобы выбрать его"
     await message.answer(text)
 
-# ====== ADMIN: SELECT CLIENT ======
-@dp.message(lambda m: m.chat.id == ADMIN_CHAT_ID and m.text.isdigit())
-async def select_client(message: types.Message):
-    global admin_active_user
-
-    client_id = int(message.text)
-
-    if client_id not in handoff_users:
-        await message.answer("❌ Клиент с таким ID не найден")
-        return
-
-    admin_active_user = client_id
-    await message.answer(
-        f"✅ Вы выбрали клиента {client_id}\n"
-        f"Теперь все ваши сообщения будут отправляться ему"
-    )
-
-# ====== ADMIN: END DIALOG ======
 @dp.message(Command("end"))
 async def end_dialog(message: types.Message):
     global admin_active_user
@@ -174,29 +158,32 @@ async def end_dialog(message: types.Message):
         return
 
     client_id = admin_active_user
-
-    # убираем клиента у администратора
     handoff_users.discard(client_id)
     admin_active_user = None
 
-    # сообщение клиенту
     await bot.send_message(
         client_id,
         "🙏 Спасибо за обращение!\n"
         "Теперь вам снова отвечает ассистент 🤖"
     )
 
-    # подтверждение админу
-    await message.answer(
-        f"✅ Диалог с клиентом {client_id} завершён\n"
-        f"Клиент передан обратно AI"
-    )
+    await message.answer("✅ Диалог завершён")
 
-# ====== ADMIN → CLIENT ======
 @dp.message(lambda m: m.chat.id == ADMIN_CHAT_ID)
 async def admin_reply(message: types.Message):
+    global admin_active_user
+
+    if message.text.isdigit():
+        uid = int(message.text)
+        if uid in handoff_users:
+            admin_active_user = uid
+            await message.answer(f"✅ Вы выбрали клиента {uid}")
+        else:
+            await message.answer("❌ Клиент не найден")
+        return
+
     if not admin_active_user:
-        await message.answer("❗ Сначала выберите клиента (/clients)")
+        await message.answer("❗ Сначала выберите клиента")
         return
 
     await bot.send_message(
@@ -204,31 +191,27 @@ async def admin_reply(message: types.Message):
         f"👩‍💼 Администратор:\n{message.text}"
     )
 
-# ====== USER MESSAGES ======
+# ====== AI ======
 @dp.message()
 async def handle_message(message: types.Message):
-    user_id = message.chat.id
-
-    # если клиент передан администратору
-    if user_id in handoff_users:
+    if message.chat.id in handoff_users:
         await bot.send_message(
             ADMIN_CHAT_ID,
-            f"💬 Клиент ({user_id}):\n{message.text}"
+            f"💬 Клиент ({message.chat.id}):\n{message.text}"
         )
         return
 
-    # AI-диалог
-    history = user_memory.get(user_id, [])
+    history = user_memory.get(message.chat.id, [])
     history.append({"role": "user", "content": message.text})
 
     reply = await ai_reply(history)
 
     history.append({"role": "assistant", "content": reply})
-    user_memory[user_id] = history[-10:]
+    user_memory[message.chat.id] = history[-10:]
 
     await message.answer(reply)
 
-# ====== START BOT ======
+# ====== START ======
 async def main():
     await dp.start_polling(bot)
 
