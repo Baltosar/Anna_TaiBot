@@ -34,22 +34,21 @@ def create_booking(name, phone, service, date, time):
         return None
 
     event = {
-    "summary": f"{service} — {name}",
-    "description": (
-        f"Клиент: {name}\n"
-        f"Телефон: {phone}\n"
-        f"Услуга: {service}"
-    ),
-    "start": {
-        "dateTime": start_time,
-        "timeZone": "Europe/Moscow",
-    },
-    "end": {
-        "dateTime": end_time,
-        "timeZone": "Europe/Moscow",
-    },
-}
-
+        "summary": f"{service} — {name}",
+        "description": (
+            f"Клиент: {name}\n"
+            f"Телефон: {phone}\n"
+            f"Услуга: {service}"
+        ),
+        "start": {
+            "dateTime": start_dt.isoformat(),
+            "timeZone": "Europe/Moscow",
+        },
+        "end": {
+            "dateTime": end_dt.isoformat(),
+            "timeZone": "Europe/Moscow",
+        },
+    }
 
     created_event = service.events().insert(
         calendarId=CALENDAR_ID,
@@ -59,11 +58,12 @@ def create_booking(name, phone, service, date, time):
     return created_event.get("htmlLink")
 
 
+
 def is_time_available(start_dt, end_dt):
     body = {
         "timeMin": start_dt.isoformat(),
         "timeMax": end_dt.isoformat(),
-        "timeZone": "Europe/Berlin",
+        "timeZone": "Europe/Moscow",
         "items": [{"id": CALENDAR_ID}],
     }
 
