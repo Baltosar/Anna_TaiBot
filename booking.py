@@ -59,15 +59,17 @@ def create_booking(name, phone, service, date, time):
 
 
 
+from datetime import timezone
+
 def is_time_available(start_dt, end_dt):
     body = {
-        "timeMin": start_dt.isoformat(),
-        "timeMax": end_dt.isoformat(),
-        "timeZone": "Europe/Moscow",
+        "timeMin": start_dt.replace(tzinfo=timezone.utc).isoformat(),
+        "timeMax": end_dt.replace(tzinfo=timezone.utc).isoformat(),
         "items": [{"id": CALENDAR_ID}],
     }
 
     result = service.freebusy().query(body=body).execute()
-    busy_times = result["calendars"][CALENDAR_ID]["busy"]
+    busy = result["calendars"][CALENDAR_ID]["busy"]
 
-    return len(busy_times) == 0
+    return len(busy) == 0
+
