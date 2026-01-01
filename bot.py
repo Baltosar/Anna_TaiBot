@@ -203,7 +203,6 @@ async def admin_reply(message: types.Message):
 @dp.message()
 async def handle_message(message: types.Message, state: FSMContext):
 
-    # если пользователь передан администратору
     if message.chat.id in handoff_users:
         await bot.send_message(
             ADMIN_CHAT_ID,
@@ -211,40 +210,29 @@ async def handle_message(message: types.Message, state: FSMContext):
         )
         return
 
-    # история диалога
     history = user_memory.get(message.chat.id, [])
     history.append({"role": "user", "content": message.text})
 
-    # AI-ответ
-    try:
-        reply = await ai_reply(history)
-    except Exception as e:
-        if "rate limit" in str(e).lower() or "429" in str(e):
-            await message.answer(
-               "⏳ Я сейчас немного перегружен.\n"
-               "Пожалуйста, подождите 20 секунд и напишите ещё раз 🙏"
-            )
-            return
-        else:
-            raise e
 
-    # 🔥 ЕСЛИ AI ПОНЯЛ, ЧТО НУЖНА ЗАПИСЬ
-    if "INTENT:BOOKING" in reply:
-        await message.answer(
-            "Отлично 👍 Давайте оформим запись.\n\n"
-            "Введите дату (например: 2026-01-03)"
-        )
+    reply = await ai_reply(history)
 
-        # ⚠️ ВАЖНО: начинаем FSM
-        await state.set_state(BookingState.date)
-        return
 
-    # обычный ответ AI
-    history.append({"role": "assistant", "content": reply})
-    user_memory[message.chat.id] = history[-10:]
+# 🔥 ЕСЛИ AI ПОНЯЛ, ЧТО ЭТО ЗАПИСЬ
+if "INTENT:BOOKING" in reply:
+    await message.answer(
+        "Отлично 👍 Давайте оформим запись.\n\n"
+        "Введите дату (например: 2026-01-03)"
+    )
 
-    await message.answer(reply)
+    # 🔁 ПЕРЕВОДИМ В FSM /book
+    await state.set_state(BookingState.date)
+    return
 
+# 🔹 Обычный AI-ответ
+history.append({"role": "assistant", "content": reply})
+user_memory[message.chat.id] = history[-10:]
+
+await message.answer(reply)
 
 
 # ====== START ======
