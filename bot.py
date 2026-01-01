@@ -92,13 +92,14 @@ async def book_date(message: types.Message, state: FSMContext):
 async def book_time(message: types.Message, state: FSMContext):
     data = await state.get_data()
 
-    link = create_booking(
-        name=data["name"],
-        phone=data["phone"],
-        service=data["service"],
-        date=data["date"],
-        time=message.text
-    )
+link = create_booking(
+    name=name,
+    phone=phone,
+    service_name=service,  # ✅ ВАЖНО: service_name, а не service
+    date=date,
+    time=time
+)
+
 
     if not link:
         await message.answer(
