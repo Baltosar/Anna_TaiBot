@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
-CALENDAR_ID = "airsmashеr@gmail.com"
+CALENDAR_ID = "calendar-bot@anntaibotcalendar.iam.gserviceaccount.com"
 
 # ====== GOOGLE CREDENTIALS ======
 credentials_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
