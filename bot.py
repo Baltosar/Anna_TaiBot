@@ -11,6 +11,25 @@ from aiogram.types import Message
 from ai import ai_reply
 from booking import create_booking
 
+# ====== ADMIN NOTIFY ======
+async def notify_admin(bot, booking: dict, user):
+    text = (
+        "📅 <b>Новая запись</b>\n\n"
+        f"👤 Клиент: {user.full_name}\n"
+        f"📞 Telegram: @{user.username or 'нет'}\n"
+        f"🧖 Услуга: {booking['service']}\n"
+        f"📆 Дата: {booking['date']}\n"
+        f"⏰ Время: {booking['time']}\n\n"
+        f"🆔 ID клиента: {user.id}"
+    )
+
+    await bot.send_message(
+        ADMIN_CHAT_ID,
+        text,
+        parse_mode="HTML"
+    )
+
+
 os.environ["AIOMISC_NO_IPV6"] = "1"
 
 # ====== ENV ======
@@ -95,7 +114,7 @@ async def book_time(message: Message, state: FSMContext):
     name = data["name"]
     phone = data["phone"]
     service = data["service"]
-    date = data["date"]      # теперь точно есть
+    date = data["date"]
     time = message.text
 
     link = create_booking(
@@ -107,9 +126,7 @@ async def book_time(message: Message, state: FSMContext):
     )
 
     if not link:
-        await message.answer(
-            "❌ Это время уже занято. Пожалуйста, выберите другое."
-        )
+        await message.answer("❌ Это время уже занято. Пожалуйста, выберите другое.")
         return
 
     await message.answer(
@@ -119,7 +136,19 @@ async def book_time(message: Message, state: FSMContext):
         f"🔗 Ссылка на событие:\n{link}"
     )
 
+    # 🔔 УВЕДОМЛЕНИЕ АДМИНИСТРАТОРУ
+    await notify_admin(
+        bot,
+        booking={
+            "service": service,
+            "date": date,
+            "time": time,
+        },
+        user=message.from_user
+    )
+
     await state.clear()
+
 
 
 # ====== CLIENT → ADMIN ======
