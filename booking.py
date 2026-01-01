@@ -1,16 +1,21 @@
+import os
+import json
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime, timedelta
 
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
-SERVICE_ACCOUNT_FILE = "credentials.json"
-CALENDAR_ID = "primary"  # или конкретный календарь
+SCOPES = ['https://www.googleapis.com/auth/calendar']
 
-credentials = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE, scopes=SCOPES
+credentials_info = json.loads(
+    os.environ['GOOGLE_CREDENTIALS_JSON']
 )
 
-service = build("calendar", "v3", credentials=credentials)
+credentials = service_account.Credentials.from_service_account_info(
+    credentials_info,
+    scopes=SCOPES
+)
+
+service = build('calendar', 'v3', credentials=credentials)
 
 
 def create_booking(name, phone, service_name, date, time):
