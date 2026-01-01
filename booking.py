@@ -29,6 +29,10 @@ def create_booking(name, phone, service_name, date, time):
     start_dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
     end_dt = start_dt + timedelta(hours=1)
 
+    # 🔒 Проверка занятости
+    if not is_time_available(start_dt, end_dt):
+        return None
+
     event = {
         "summary": f"💆 Тайский массаж — {name}",
         "description": (
@@ -52,3 +56,17 @@ def create_booking(name, phone, service_name, date, time):
     ).execute()
 
     return created_event.get("htmlLink")
+
+
+def is_time_available(start_dt, end_dt):
+    body = {
+        "timeMin": start_dt.isoformat(),
+        "timeMax": end_dt.isoformat(),
+        "timeZone": "Europe/Berlin",
+        "items": [{"id": CALENDAR_ID}],
+    }
+
+    result = service.freebusy().query(body=body).execute()
+    busy_times = result["calendars"][CALENDAR_ID]["busy"]
+
+    return len(busy_times) == 0
