@@ -101,7 +101,7 @@ if not link:
     )
     return
 
-await message.answer(
+    await message.answer(
     "✅ Вы успешно записаны!\n"
     f"📅 Ссылка на событие:\n{link}"
 )
