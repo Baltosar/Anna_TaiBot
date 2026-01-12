@@ -1,65 +1,65 @@
 import asyncio
 import os
+import uuid
 import logging
-from aiogram import Bot, Dispatcher, types
+from datetime import datetime
+
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    CallbackQuery
+)
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message
+from aiogram.fsm.state import StatesGroup, State
+
 from ai import ai_reply
-from booking import create_booking
-
-# ====== ADMIN NOTIFY ======
-async def notify_admin(bot, booking: dict, user):
-    text = (
-        "📅 <b>Новая запись</b>\n\n"
-        f"👤 Клиент: {user.full_name}\n"
-        f"📞 Telegram: @{user.username or 'нет'}\n"
-        f"🧖 Услуга: {booking['service']}\n"
-        f"📆 Дата: {booking['date']}\n"
-        f"⏰ Время: {booking['time']}\n\n"
-        f"🆔 ID клиента: {user.id}"
-    )
-
-    await bot.send_message(
-        ADMIN_CHAT_ID,
-        text,
-        parse_mode="HTML"
-    )
-
+from booking import create_booking, check_slot_available
 
 os.environ["AIOMISC_NO_IPV6"] = "1"
 
+# ====== LOGGING ======
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger("bot")
+
+BOOKINGS_LOG_PATH = "bookings.log"
+
+
+def log_booking_line(text: str) -> None:
+    try:
+        with open(BOOKINGS_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(text.rstrip() + "\n")
+    except Exception as e:
+        logger.exception(f"Failed to write bookings log: {e}")
+
+
 # ====== ENV ======
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
-
+ADMIN_CHAT_ID_RAW = os.getenv("ADMIN_CHAT_ID")  # "id1,id2"
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN not set")
 
-if not ADMIN_CHAT_ID:
+if not ADMIN_CHAT_ID_RAW:
     raise RuntimeError("ADMIN_CHAT_ID not set")
 
-ADMIN_CHAT_ID = int(ADMIN_CHAT_ID)
+ADMIN_IDS = [int(x.strip()) for x in ADMIN_CHAT_ID_RAW.split(",") if x.strip().isdigit()]
+if not ADMIN_IDS:
+    raise RuntimeError("ADMIN_CHAT_ID has no valid IDs")
 
 # ====== BOT ======
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+dp = Dispatcher()
 
-# ====== STATE ======
-user_memory = {}
-handoff_users = set()
-admin_active_user = None
-
-# ====== BOOKING FSM ======
-class BookingState(StatesGroup):
-    name = State()
-    phone = State()
-    service = State()
-    date = State()
-    time = State()
+# ====== MEMORY & ADMIN STATE ======
+user_memory = {}  # user_id -> history list
+handoff_users = set()  # users currently in admin mode
+admin_active_user = {}  # admin_id -> selected client_id
+admin_clients = {}  # client_id -> {"username": "...", "first_name": "..."}
+pending_bookings = {}  # booking_req_id -> dict(data)
 
 # ====== KEYBOARD ======
 admin_kb = ReplyKeyboardMarkup(
@@ -67,7 +67,40 @@ admin_kb = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ====== START ======
+# ====== FSM ======
+class BookingStates(StatesGroup):
+    name = State()
+    phone = State()
+    service = State()
+    date = State()
+    time = State()
+
+
+# ====== HELPERS ======
+async def notify_admins(text: str, reply_markup=None):
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, text, reply_markup=reply_markup)
+        except Exception as e:
+            logger.warning(f"Cannot send to admin {admin_id}: {e}")
+
+
+def booking_admin_keyboard(req_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"bk:ok:{req_id}"),
+            InlineKeyboardButton(text="❌ Отменить", callback_data=f"bk:no:{req_id}")
+        ]
+    ])
+
+
+def safe_username(u: types.User) -> str:
+    if u.username:
+        return f"@{u.username}"
+    return f"{u.first_name or ''}".strip() or "без username"
+
+
+# ====== COMMANDS ======
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
@@ -77,190 +110,358 @@ async def start(message: types.Message):
         reply_markup=admin_kb
     )
 
-# ====== BOOKING FLOW ======
-@dp.message(Command("book"))
-async def book_start(message: types.Message, state: FSMContext):
-    await message.answer("Как вас зовут?")
-    await state.set_state(BookingState.name)
 
-@dp.message(BookingState.name)
-async def book_name(message: types.Message, state: FSMContext):
-    await state.update_data(name=message.text)
-    await message.answer("Ваш телефон?")
-    await state.set_state(BookingState.phone)
-
-@dp.message(BookingState.phone)
-async def book_phone(message: types.Message, state: FSMContext):
-    await state.update_data(phone=message.text)
-    await message.answer("Какую процедуру вы хотите?")
-    await state.set_state(BookingState.service)
-
-@dp.message(BookingState.service)
-async def book_service(message: types.Message, state: FSMContext):
-    await state.update_data(service=message.text)
-    await message.answer("Дата записи? (ГГГГ-ММ-ДД)")
-    await state.set_state(BookingState.date)
-
-@dp.message(BookingState.date)
-async def book_date(message: Message, state: FSMContext):
-    await state.update_data(date=message.text)
-    await message.answer("Время записи? (например 14:00)")
-    await state.set_state(BookingState.time)
-
-@dp.message(BookingState.time)
-async def book_time(message: Message, state: FSMContext):
-    data = await state.get_data()
-
-    name = data["name"]
-    phone = data["phone"]
-    service = data["service"]
-    date = data["date"]
-    time = message.text
-
-    link = create_booking(
-        name=name,
-        phone=phone,
-        service_name=service,
-        date=date,
-        time=time
-    )
-
-    if not link:
-        await message.answer("❌ Это время уже занято. Пожалуйста, выберите другое.")
-        return
-
-    await message.answer(
-        f"✅ Клиент записан!\n\n"
-        f"📅 Дата: {date}\n"
-        f"⏰ Время: {time}\n"
-        f"🔗 Ссылка на событие:\n{link}"
-    )
-
-    # 🔔 УВЕДОМЛЕНИЕ АДМИНИСТРАТОРУ
-    await notify_admin(
-        bot,
-        booking={
-            "service": service,
-            "date": date,
-            "time": time,
-        },
-        user=message.from_user
-    )
-
-    await state.clear()
-
-
-
-# ====== CLIENT → ADMIN ======
-@dp.message(lambda m: m.text == "👩‍💼 Администратор")
+@dp.message(F.text == "👩‍💼 Администратор")
 async def admin_button(message: types.Message):
-    handoff_users.add(message.chat.id)
+    user_id = message.chat.id
+    handoff_users.add(user_id)
+
+    admin_clients[user_id] = {
+        "username": message.from_user.username or "",
+        "first_name": message.from_user.first_name or ""
+    }
 
     await message.answer(
         "👩‍💼 Я передал диалог администратору.\n"
         "Он скоро вам ответит 🙏"
     )
 
-    await bot.send_message(
-        ADMIN_CHAT_ID,
-        f"📩 Новый клиент\nID: {message.chat.id}"
+    await notify_admins(
+        "📩 Новый клиент (перевод к администратору)\n"
+        f"ID: {user_id}\n"
+        f"Username: {safe_username(message.from_user)}\n"
+        "Команда админа: /clients → выбери ID клиента"
     )
 
-# ====== ADMIN COMMANDS ======
+
 @dp.message(Command("clients"))
 async def clients_list(message: types.Message):
-    if message.chat.id != ADMIN_CHAT_ID:
+    if message.chat.id not in ADMIN_IDS:
         return
 
     if not handoff_users:
         await message.answer("❗ Нет активных клиентов")
         return
 
-    text = "📋 Клиенты:\n\n"
-    for uid in handoff_users:
-        marker = "👉 " if uid == admin_active_user else ""
-        text += f"{marker}{uid}\n"
+    text = "📋 Клиенты в админ-режиме:\n\n"
+    for uid in sorted(handoff_users):
+        marker = "👉 " if admin_active_user.get(message.chat.id) == uid else ""
+        info = admin_clients.get(uid, {})
+        uname = info.get("username", "")
+        first = info.get("first_name", "")
+        label = f"{first}".strip() or ""
+        if uname:
+            label = (label + " " + f"@{uname}").strip()
+        if label:
+            text += f"{marker}ID: {uid} ({label})\n"
+        else:
+            text += f"{marker}ID: {uid}\n"
 
+    text += "\n✏️ Напиши ID клиента, чтобы выбрать его (после этого твои сообщения пойдут ему)."
     await message.answer(text)
 
+
+@dp.message(F.text.regexp(r"^\d+$"))
+async def admin_select_client(message: types.Message):
+    # выбор клиента только админом
+    if message.chat.id not in ADMIN_IDS:
+        return
+
+    uid = int(message.text)
+    if uid not in handoff_users:
+        await message.answer("❌ Клиент с таким ID не найден (или уже вышел из админ-режима).")
+        return
+
+    admin_active_user[message.chat.id] = uid
+    await message.answer(f"✅ Вы выбрали клиента ID {uid}\nТеперь все ваши сообщения будут отправляться ему.")
+
+
 @dp.message(Command("end"))
-async def end_dialog(message: types.Message):
-    global admin_active_user
+async def end_dialog(message: types.Message, state: FSMContext):
+    # /end может писать и клиент, и админ (для клиента/чата админа логика разная)
+    if message.chat.id in ADMIN_IDS:
+        # админ завершает диалог с выбранным клиентом
+        uid = admin_active_user.get(message.chat.id)
+        if not uid:
+            await message.answer("❗ Сначала выбери клиента через /clients")
+            return
 
-    if message.chat.id != ADMIN_CHAT_ID:
-        return
-
-    if not admin_active_user:
-        await message.answer("❗ Нет активного диалога")
-        return
-
-    client_id = admin_active_user
-    handoff_users.discard(client_id)
-    admin_active_user = None
-
-    await bot.send_message(
-        client_id,
-        "🙏 Спасибо за обращение!\n"
-        "Теперь вам снова отвечает ассистент 🤖"
-    )
-
-    await message.answer("✅ Диалог завершён")
-
-@dp.message(lambda m: m.chat.id == ADMIN_CHAT_ID)
-async def admin_reply(message: types.Message):
-    global admin_active_user
-
-    if message.text.isdigit():
-        uid = int(message.text)
         if uid in handoff_users:
-            admin_active_user = uid
-            await message.answer(f"✅ Вы выбрали клиента {uid}")
-        else:
-            await message.answer("❌ Клиент не найден")
+            handoff_users.remove(uid)
+
+        admin_active_user[message.chat.id] = None
+
+        try:
+            await bot.send_message(uid, "✅ Диалог с администратором завершён. Возвращаю вас к AI-помощнику 🙏")
+        except Exception:
+            pass
+
+        await message.answer("✅ Клиент возвращён к AI.")
         return
 
-    if not admin_active_user:
-        await message.answer("❗ Сначала выберите клиента")
+    # клиент завершает админ-режим
+    user_id = message.chat.id
+    if user_id in handoff_users:
+        handoff_users.remove(user_id)
+
+    # удалить активность у всех админов, если они были на этом клиенте
+    for aid, active_uid in list(admin_active_user.items()):
+        if active_uid == user_id:
+            admin_active_user[aid] = None
+
+    await state.clear()
+    await message.answer("✅ Возвращаю вас к AI-помощнику. Чем помочь? 🙏")
+
+
+# ====== BOOKING FLOW ======
+@dp.message(Command("book"))
+async def book_start(message: types.Message, state: FSMContext):
+    await state.set_state(BookingStates.name)
+    await message.answer("📝 Давайте запишем вас.\nКак вас зовут?")
+
+
+@dp.message(BookingStates.name)
+async def book_name(message: types.Message, state: FSMContext):
+    await state.update_data(name=message.text.strip())
+    await state.set_state(BookingStates.phone)
+    await message.answer("📞 Ваш номер телефона?")
+
+
+@dp.message(BookingStates.phone)
+async def book_phone(message: types.Message, state: FSMContext):
+    await state.update_data(phone=message.text.strip())
+    await state.set_state(BookingStates.service)
+    await message.answer("💆‍♀️ На какую услугу записать? (например: Тайский массаж 60 мин)")
+
+
+@dp.message(BookingStates.service)
+async def book_service(message: types.Message, state: FSMContext):
+    await state.update_data(service=message.text.strip())
+    await state.set_state(BookingStates.date)
+    await message.answer("📅 Дата в формате YYYY-MM-DD (например: 2026-01-15)")
+
+
+@dp.message(BookingStates.date)
+async def book_date(message: types.Message, state: FSMContext):
+    date_str = message.text.strip()
+    # быстрая валидация
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        await message.answer("❗ Неверный формат даты. Нужно YYYY-MM-DD, например 2026-01-15")
         return
 
-    await bot.send_message(
-        admin_active_user,
-        f"👩‍💼 Администратор:\n{message.text}"
+    await state.update_data(date=date_str)
+    await state.set_state(BookingStates.time)
+    await message.answer("⏰ Время в формате HH:MM (например: 18:30)")
+
+
+@dp.message(BookingStates.time)
+async def book_time(message: types.Message, state: FSMContext):
+    time_str = message.text.strip()
+    try:
+        datetime.strptime(time_str, "%H:%M")
+    except ValueError:
+        await message.answer("❗ Неверный формат времени. Нужно HH:MM, например 18:30")
+        return
+
+    data = await state.get_data()
+    name = data.get("name", "")
+    phone = data.get("phone", "")
+    service_name = data.get("service", "")
+    date_str = data.get("date", "")
+
+    # 1) Проверяем слот свободен?
+    free = check_slot_available(date_str=date_str, time_str=time_str, duration_minutes=60)
+    if not free:
+        await message.answer("⛔ Это время уже занято. Попробуйте другое время или дату.")
+        await state.clear()
+        return
+
+    # 2) Создаём заявку на подтверждение админом
+    req_id = uuid.uuid4().hex[:10]
+    pending_bookings[req_id] = {
+        "user_id": message.chat.id,
+        "name": name,
+        "phone": phone,
+        "service": service_name,
+        "date": date_str,
+        "time": time_str,
+        "duration": 60,
+    }
+
+    await message.answer(
+        "✅ Заявка на запись создана!\n"
+        "Я отправил её администратору на подтверждение 🙏\n"
+        "Как только подтвердят — пришлю вам итог."
     )
 
-# ====== AI ======
+    admin_text = (
+        "🆕 Заявка на запись\n"
+        f"ID заявки: {req_id}\n"
+        f"Клиент ID: {message.chat.id}\n"
+        f"Имя: {name}\n"
+        f"Телефон: {phone}\n"
+        f"Услуга: {service_name}\n"
+        f"Дата/время: {date_str} {time_str} (МСК)\n\n"
+        "Подтвердить запись?"
+    )
+
+    log_booking_line(
+        f"[REQUEST] req_id={req_id} user_id={message.chat.id} "
+        f"name={name} phone={phone} service={service_name} "
+        f"datetime={date_str} {time_str} MSK"
+    )
+
+    await notify_admins(admin_text, reply_markup=booking_admin_keyboard(req_id))
+    await state.clear()
+
+
+@dp.callback_query(F.data.startswith("bk:"))
+async def booking_admin_decision(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        await callback.answer("Некорректные данные", show_alert=True)
+        return
+
+    action = parts[1]  # ok / no
+    req_id = parts[2]
+
+    req = pending_bookings.get(req_id)
+    if not req:
+        await callback.answer("Заявка уже обработана или не найдена", show_alert=True)
+        return
+
+    user_id = req["user_id"]
+
+    if action == "no":
+        pending_bookings.pop(req_id, None)
+        await callback.message.edit_text(f"❌ Заявка {req_id} отменена администратором.")
+        await callback.answer("Отменено")
+
+        log_booking_line(f"[CANCEL] req_id={req_id} admin_id={callback.from_user.id}")
+
+        try:
+            await bot.send_message(
+                user_id,
+                "❌ Администратор отменил запись.\n"
+                "Напишите другое время/дату или задайте вопрос — я помогу 🙏"
+            )
+        except Exception:
+            pass
+        return
+
+    # action == "ok" → создаём событие
+    # перед созданием ещё раз проверим слот (на всякий)
+    free = check_slot_available(req["date"], req["time"], duration_minutes=req.get("duration", 60))
+    if not free:
+        pending_bookings.pop(req_id, None)
+        await callback.message.edit_text(
+            f"⛔ Заявка {req_id}: время уже занято (кто-то успел записаться)."
+        )
+        await callback.answer("Время занято")
+
+        log_booking_line(f"[FAIL_BUSY] req_id={req_id} admin_id={callback.from_user.id}")
+
+        try:
+            await bot.send_message(
+                user_id,
+                "⛔ Увы, это время уже заняли.\n"
+                "Выберите другое время/дату, пожалуйста 🙏"
+            )
+        except Exception:
+            pass
+        return
+
+    link = create_booking(
+        name=req["name"],
+        phone=req["phone"],
+        service_name=req["service"],
+        date_str=req["date"],
+        time_str=req["time"],
+        duration_minutes=req.get("duration", 60),
+    )
+
+    pending_bookings.pop(req_id, None)
+
+    if not link:
+        await callback.message.edit_text(f"⛔ Заявка {req_id}: не удалось создать событие (ошибка).")
+        await callback.answer("Ошибка")
+
+        log_booking_line(f"[FAIL_CREATE] req_id={req_id} admin_id={callback.from_user.id}")
+
+        try:
+            await bot.send_message(
+                user_id,
+                "⛔ Не получилось создать запись в календаре.\n"
+                "Администратор свяжется с вами 🙏"
+            )
+        except Exception:
+            pass
+        return
+
+    await callback.message.edit_text(
+        f"✅ Заявка {req_id} подтверждена.\n"
+        f"Событие создано: {link}"
+    )
+    await callback.answer("Подтверждено")
+
+    log_booking_line(f"[CONFIRM] req_id={req_id} admin_id={callback.from_user.id} link={link}")
+
+    try:
+        await bot.send_message(
+            user_id,
+            "✅ Запись подтверждена!\n"
+            f"📅 {req['date']} {req['time']} (МСК)\n"
+            f"💆 {req['service']}\n\n"
+            f"Ссылка на событие: {link}"
+        )
+    except Exception:
+        pass
+
+
+# ====== ADMIN CHAT RELAY ======
+@dp.message(F.chat.id.in_(ADMIN_IDS))
+async def admin_messages(message: types.Message):
+    # если это не /clients и не выбор ID и не callback — значит это сообщение админа клиенту
+    # (команды уже обработаются отдельными хендлерами)
+    if message.text and message.text.startswith("/"):
+        return
+
+    target = admin_active_user.get(message.chat.id)
+    if not target:
+        await message.answer("❗ Нет активного клиента. Используй /clients и выбери ID.")
+        return
+
+    try:
+        await bot.send_message(target, f"👩‍💼 Администратор:\n{message.text}")
+    except Exception as e:
+        await message.answer(f"❗ Не удалось отправить клиенту: {e}")
+
+
+# ====== USER MESSAGES ======
 @dp.message()
 async def handle_message(message: types.Message, state: FSMContext):
+    user_id = message.chat.id
 
-    # если диалог передан администратору
-    if message.chat.id in handoff_users:
-        await bot.send_message(
-            ADMIN_CHAT_ID,
-            f"💬 Клиент ({message.chat.id}):\n{message.text}"
-        )
+    # если клиент в админ-режиме — пересылаем админам
+    if user_id in handoff_users:
+        await notify_admins(f"💬 Клиент (ID {user_id}):\n{message.text}")
         return
 
-    history = user_memory.get(message.chat.id, [])
+    # AI-режим: можно здесь добавить “автопереход” к /book по смыслу,
+    # но чтобы не ломать — оставляем стабильный вариант:
+    history = user_memory.get(user_id, [])
     history.append({"role": "user", "content": message.text})
 
-    # ⚠️ ВАЖНО: await ТОЛЬКО ВНУТРИ async-функции
     reply = await ai_reply(history)
 
-    # 🔥 ЕСЛИ AI ПОНЯЛ, ЧТО ЭТО ЗАПИСЬ
-    if "INTENT:BOOKING" in reply:
-        await message.answer(
-        "Отлично 👍 Я помогу вас записать.\n\n"
-        "Как вас зовут?"
-        )
-
-         # 🔥 ПРАВИЛЬНО: начинаем FSM С НАЧАЛА
-        await state.set_state(BookingState.name)
-        return
-
-
-    # 🔹 обычный AI-ответ
     history.append({"role": "assistant", "content": reply})
-    user_memory[message.chat.id] = history[-10:]
+    user_memory[user_id] = history[-10:]
 
     await message.answer(reply)
 
