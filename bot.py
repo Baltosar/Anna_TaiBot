@@ -2,6 +2,7 @@ import asyncio
 import os
 import uuid
 import logging
+import re
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F, types
@@ -15,7 +16,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 
 from ai import ai_reply
-from booking import create_booking, check_slot_available
+from booking import (
+    create_booking,
+    check_slot_available,
+    suggest_next_free_slots,
+    parse_datetime_from_text,
+)
 
 os.environ["AIOMISC_NO_IPV6"] = "1"
 
@@ -86,18 +92,112 @@ async def notify_admins(text: str, reply_markup=None):
 
 
 def booking_admin_keyboard(req_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"bk:ok:{req_id}"),
-            InlineKeyboardButton(text="❌ Отменить", callback_data=f"bk:no:{req_id}")
-        ]
-    ])
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"bk:ok:{req_id}"),
+        InlineKeyboardButton(text="❌ Отменить", callback_data=f"bk:no:{req_id}")
+    ]])
 
 
 def safe_username(u: types.User) -> str:
     if u.username:
         return f"@{u.username}"
     return f"{u.first_name or ''}".strip() or "без username"
+
+
+def format_slots(slots: list[tuple[str, str]]) -> str:
+    if not slots:
+        return "К сожалению, ближайших слотов не нашёл 😕"
+    lines = []
+    for d, t in slots:
+        lines.append(f"• {d} {t} (МСК)")
+    return "\n".join(lines)
+
+
+async def create_pending_request_from_state(message: types.Message, state: FSMContext, date_str: str, time_str: str):
+    """
+    Общая финализация: проверяем слот + создаём заявку на админ-подтверждение.
+    """
+    data = await state.get_data()
+    name = data.get("name", "")
+    phone = data.get("phone", "")
+    service_name = data.get("service", "")
+
+    # 1) Проверка слота (учитывает "в будущем" внутри booking.py)
+    free = check_slot_available(date_str=date_str, time_str=time_str, duration_minutes=60)
+    if not free:
+        # предлагаем ближайшие
+        # старт от указанного времени, чтобы “рядом” предлагать
+        try:
+            start_dt_pref = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        except Exception:
+            start_dt_pref = None
+
+        slots = suggest_next_free_slots(limit=5)
+        await message.answer(
+            "⛔ Это время недоступно (занято или уже прошло).\n"
+            "Вот ближайшие свободные варианты:\n"
+            f"{format_slots(slots)}\n\n"
+            "Напишите один из вариантов (например: “завтра 18:30” или “2026-01-15 10:00”)."
+        )
+        await state.clear()
+        return
+
+    # 2) Создаём заявку на подтверждение админом
+    req_id = uuid.uuid4().hex[:10]
+    pending_bookings[req_id] = {
+        "user_id": message.chat.id,
+        "name": name,
+        "phone": phone,
+        "service": service_name,
+        "date": date_str,
+        "time": time_str,
+        "duration": 60,
+    }
+
+    await message.answer(
+        "✅ Заявка на запись создана!\n"
+        "Я отправил её администратору на подтверждение 🙏\n"
+        "Как только подтвердят — пришлю вам итог."
+    )
+
+    admin_text = (
+        "🆕 Заявка на запись\n"
+        f"ID заявки: {req_id}\n"
+        f"Клиент ID: {message.chat.id}\n"
+        f"Имя: {name}\n"
+        f"Телефон: {phone}\n"
+        f"Услуга: {service_name}\n"
+        f"Дата/время: {date_str} {time_str} (МСК)\n\n"
+        "Подтвердить запись?"
+    )
+
+    log_booking_line(
+        f"[REQUEST] req_id={req_id} user_id={message.chat.id} "
+        f"name={name} phone={phone} service={service_name} "
+        f"datetime={date_str} {time_str} MSK"
+    )
+
+    await notify_admins(admin_text, reply_markup=booking_admin_keyboard(req_id))
+    await state.clear()
+
+
+def looks_like_booking_intent(text: str) -> bool:
+    t = (text or "").lower()
+    keywords = ["запиши", "запис", "бронь", "заброни", "хочу", "массаж", "сеанс"]
+    return any(k in t for k in keywords)
+
+
+def extract_service_hint(text: str) -> str | None:
+    """
+    Очень простой эвристический “намёк” на услугу.
+    Если не нашли — вернём None, тогда FSM спросит.
+    """
+    t = (text or "").lower()
+    if "тайск" in t:
+        return "Тайский массаж"
+    if "мас" in t:
+        return "Массаж"
+    return None
 
 
 # ====== COMMANDS ======
@@ -163,7 +263,6 @@ async def clients_list(message: types.Message):
 
 @dp.message(F.text.regexp(r"^\d+$"))
 async def admin_select_client(message: types.Message):
-    # выбор клиента только админом
     if message.chat.id not in ADMIN_IDS:
         return
 
@@ -178,9 +277,7 @@ async def admin_select_client(message: types.Message):
 
 @dp.message(Command("end"))
 async def end_dialog(message: types.Message, state: FSMContext):
-    # /end может писать и клиент, и админ (для клиента/чата админа логика разная)
     if message.chat.id in ADMIN_IDS:
-        # админ завершает диалог с выбранным клиентом
         uid = admin_active_user.get(message.chat.id)
         if not uid:
             await message.answer("❗ Сначала выбери клиента через /clients")
@@ -199,12 +296,10 @@ async def end_dialog(message: types.Message, state: FSMContext):
         await message.answer("✅ Клиент возвращён к AI.")
         return
 
-    # клиент завершает админ-режим
     user_id = message.chat.id
     if user_id in handoff_users:
         handoff_users.remove(user_id)
 
-    # удалить активность у всех админов, если они были на этом клиенте
     for aid, active_uid in list(admin_active_user.items()):
         if active_uid == user_id:
             admin_active_user[aid] = None
@@ -230,6 +325,22 @@ async def book_name(message: types.Message, state: FSMContext):
 @dp.message(BookingStates.phone)
 async def book_phone(message: types.Message, state: FSMContext):
     await state.update_data(phone=message.text.strip())
+    data = await state.get_data()
+
+    # если услуга уже предзаполнена (из AI-чата) — идём дальше
+    if data.get("service"):
+        if data.get("date") and data.get("time"):
+            await create_pending_request_from_state(message, state, data["date"], data["time"])
+            return
+        if data.get("date"):
+            await state.set_state(BookingStates.time)
+            await message.answer("⏰ Время в формате HH:MM (например: 18:30)")
+            return
+
+        await state.set_state(BookingStates.date)
+        await message.answer("📅 Дата: можно 'сегодня', 'завтра' или YYYY-MM-DD (например: 2026-01-15)")
+        return
+
     await state.set_state(BookingStates.service)
     await message.answer("💆‍♀️ На какую услугу записать? (например: Тайский массаж 60 мин)")
 
@@ -237,86 +348,84 @@ async def book_phone(message: types.Message, state: FSMContext):
 @dp.message(BookingStates.service)
 async def book_service(message: types.Message, state: FSMContext):
     await state.update_data(service=message.text.strip())
+    data = await state.get_data()
+
+    if data.get("date") and data.get("time"):
+        await create_pending_request_from_state(message, state, data["date"], data["time"])
+        return
+
+    if data.get("date"):
+        await state.set_state(BookingStates.time)
+        await message.answer("⏰ Время в формате HH:MM (например: 18:30)")
+        return
+
     await state.set_state(BookingStates.date)
-    await message.answer("📅 Дата в формате YYYY-MM-DD (например: 2026-01-15)")
+    await message.answer("📅 Дата: можно 'сегодня', 'завтра' или YYYY-MM-DD (например: 2026-01-15)")
 
 
 @dp.message(BookingStates.date)
 async def book_date(message: types.Message, state: FSMContext):
-    date_str = message.text.strip()
-    # быстрая валидация
-    try:
-        datetime.strptime(date_str, "%Y-%m-%d")
-    except ValueError:
-        await message.answer("❗ Неверный формат даты. Нужно YYYY-MM-DD, например 2026-01-15")
+    raw = message.text.strip()
+    date_str, time_str = parse_datetime_from_text(raw)
+
+    # если пользователь прислал сразу "сегодня 10:00" на шаге даты — ок
+    if date_str and time_str:
+        await state.update_data(date=date_str, time=time_str)
+        await create_pending_request_from_state(message, state, date_str, time_str)
         return
 
-    await state.update_data(date=date_str)
+    # иначе ожидаем чистую дату
+    try:
+        datetime.strptime(raw, "%Y-%m-%d")
+    except ValueError:
+        await message.answer(
+            "❗ Неверный формат даты.\n"
+            "Можно так:\n"
+            "• 2026-01-15\n"
+            "• сегодня 18:30\n"
+            "• завтра 10:00\n"
+            "• 05.01 12:00"
+        )
+        return
+
+    await state.update_data(date=raw)
     await state.set_state(BookingStates.time)
     await message.answer("⏰ Время в формате HH:MM (например: 18:30)")
 
 
 @dp.message(BookingStates.time)
 async def book_time(message: types.Message, state: FSMContext):
-    time_str = message.text.strip()
+    raw = message.text.strip()
+    date_str, time_str = parse_datetime_from_text(raw)
+
+    if date_str and time_str:
+        await state.update_data(date=date_str, time=time_str)
+        await create_pending_request_from_state(message, state, date_str, time_str)
+        return
+
+    # чистое время
     try:
-        datetime.strptime(time_str, "%H:%M")
+        datetime.strptime(raw, "%H:%M")
     except ValueError:
-        await message.answer("❗ Неверный формат времени. Нужно HH:MM, например 18:30")
+        await message.answer(
+            "❗ Неверный формат времени.\n"
+            "Можно так: 18:30\n"
+            "Или сразу: сегодня 18:30 / завтра 10:00"
+        )
         return
 
     data = await state.get_data()
-    name = data.get("name", "")
-    phone = data.get("phone", "")
-    service_name = data.get("service", "")
     date_str = data.get("date", "")
-
-    # 1) Проверяем слот свободен?
-    free = check_slot_available(date_str=date_str, time_str=time_str, duration_minutes=60)
-    if not free:
-        await message.answer("⛔ Это время уже занято. Попробуйте другое время или дату.")
-        await state.clear()
+    if not date_str:
+        await message.answer("❗ Сначала укажите дату.")
+        await state.set_state(BookingStates.date)
         return
 
-    # 2) Создаём заявку на подтверждение админом
-    req_id = uuid.uuid4().hex[:10]
-    pending_bookings[req_id] = {
-        "user_id": message.chat.id,
-        "name": name,
-        "phone": phone,
-        "service": service_name,
-        "date": date_str,
-        "time": time_str,
-        "duration": 60,
-    }
-
-    await message.answer(
-        "✅ Заявка на запись создана!\n"
-        "Я отправил её администратору на подтверждение 🙏\n"
-        "Как только подтвердят — пришлю вам итог."
-    )
-
-    admin_text = (
-        "🆕 Заявка на запись\n"
-        f"ID заявки: {req_id}\n"
-        f"Клиент ID: {message.chat.id}\n"
-        f"Имя: {name}\n"
-        f"Телефон: {phone}\n"
-        f"Услуга: {service_name}\n"
-        f"Дата/время: {date_str} {time_str} (МСК)\n\n"
-        "Подтвердить запись?"
-    )
-
-    log_booking_line(
-        f"[REQUEST] req_id={req_id} user_id={message.chat.id} "
-        f"name={name} phone={phone} service={service_name} "
-        f"datetime={date_str} {time_str} MSK"
-    )
-
-    await notify_admins(admin_text, reply_markup=booking_admin_keyboard(req_id))
-    await state.clear()
+    await state.update_data(time=raw)
+    await create_pending_request_from_state(message, state, date_str, raw)
 
 
+# ====== ADMIN CONFIRMATION CALLBACK ======
 @dp.callback_query(F.data.startswith("bk:"))
 async def booking_admin_decision(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
@@ -361,17 +470,21 @@ async def booking_admin_decision(callback: CallbackQuery):
     if not free:
         pending_bookings.pop(req_id, None)
         await callback.message.edit_text(
-            f"⛔ Заявка {req_id}: время уже занято (кто-то успел записаться)."
+            f"⛔ Заявка {req_id}: время недоступно (занято или уже прошло)."
         )
-        await callback.answer("Время занято")
+        await callback.answer("Время недоступно")
 
-        log_booking_line(f"[FAIL_BUSY] req_id={req_id} admin_id={callback.from_user.id}")
+        log_booking_line(f"[FAIL_BUSY_OR_PAST] req_id={req_id} admin_id={callback.from_user.id}")
 
+        # предложим альтернативы клиенту
+        slots = suggest_next_free_slots(limit=5)
         try:
             await bot.send_message(
                 user_id,
-                "⛔ Увы, это время уже заняли.\n"
-                "Выберите другое время/дату, пожалуйста 🙏"
+                "⛔ Увы, этот слот уже недоступен.\n"
+                "Ближайшие свободные варианты:\n"
+                f"{format_slots(slots)}\n\n"
+                "Напишите один из вариантов, и я отправлю администратору на подтверждение 🙏"
             )
         except Exception:
             pass
@@ -427,8 +540,6 @@ async def booking_admin_decision(callback: CallbackQuery):
 # ====== ADMIN CHAT RELAY ======
 @dp.message(F.chat.id.in_(ADMIN_IDS))
 async def admin_messages(message: types.Message):
-    # если это не /clients и не выбор ID и не callback — значит это сообщение админа клиенту
-    # (команды уже обработаются отдельными хендлерами)
     if message.text and message.text.startswith("/"):
         return
 
@@ -447,16 +558,59 @@ async def admin_messages(message: types.Message):
 @dp.message()
 async def handle_message(message: types.Message, state: FSMContext):
     user_id = message.chat.id
+    text = message.text or ""
 
     # если клиент в админ-режиме — пересылаем админам
     if user_id in handoff_users:
-        await notify_admins(f"💬 Клиент (ID {user_id}):\n{message.text}")
+        await notify_admins(f"💬 Клиент (ID {user_id}):\n{text}")
         return
 
-    # AI-режим: можно здесь добавить “автопереход” к /book по смыслу,
-    # но чтобы не ломать — оставляем стабильный вариант:
+    # ====== AI-CHAT → TRY BOOKING ROUTE ======
+    # Если человек написал "сегодня 10:00" / "завтра 18:30" и похоже на запись —
+    # запускаем FSM и предзаполняем дату/время (и по возможности услугу).
+    date_str, time_str = parse_datetime_from_text(text)
+
+    if time_str and looks_like_booking_intent(text):
+        # если нет даты — уточним (предложим ближайшие)
+        if not date_str:
+            slots = suggest_next_free_slots(limit=5)
+            await message.answer(
+                "Понял, хотите записаться 🙏\n"
+                "Напишите дату и время, например: “сегодня 18:30” или “2026-01-15 10:00”.\n\n"
+                "Ближайшие свободные варианты:\n"
+                f"{format_slots(slots)}"
+            )
+            return
+
+        # если слот недоступен — предложим ближайшие
+        if not check_slot_available(date_str, time_str, duration_minutes=60):
+            slots = suggest_next_free_slots(limit=5)
+            await message.answer(
+                "⛔ Это время недоступно (занято или уже прошло).\n"
+                "Ближайшие свободные варианты:\n"
+                f"{format_slots(slots)}\n\n"
+                "Напишите один из вариантов (например: “завтра 18:30”)."
+            )
+            return
+
+        # слот ок → переходим в FSM и дальше собираем имя/телефон/услугу
+        await state.clear()
+        await state.update_data(date=date_str, time=time_str)
+
+        svc = extract_service_hint(text)
+        if svc:
+            await state.update_data(service=svc)
+
+        await state.set_state(BookingStates.name)
+        await message.answer(
+            f"Отлично! Записываю на {date_str} {time_str} (МСК).\n"
+            "Как вас зовут?"
+        )
+        return
+
+    # ====== NORMAL AI MODE ======
     history = user_memory.get(user_id, [])
-    history.append({"role": "user", "content": message.text})
+    history.append({"role": "user", "content": text})
 
     reply = await ai_reply(history)
 
@@ -472,3 +626,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+

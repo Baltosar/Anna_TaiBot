@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -29,6 +30,11 @@ credentials = service_account.Credentials.from_service_account_info(
 service = build("calendar", "v3", credentials=credentials)
 
 
+# ====== TIME HELPERS ======
+def now_local() -> datetime:
+    return datetime.now(TZ)
+
+
 def _local_dt(date_str: str, time_str: str) -> datetime:
     # date_str: YYYY-MM-DD, time_str: HH:MM
     naive = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
@@ -39,13 +45,80 @@ def _to_utc_rfc3339(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def is_future_slot(start_local: datetime) -> bool:
+    # строго в будущем (если уже наступило — нельзя)
+    return start_local > now_local()
+
+
+# ====== PARSER (для "сегодня 10:00" и т.п.) ======
+_DATE_ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+_DATE_DMY = re.compile(r"\b(\d{1,2})[.\-/](\d{1,2})(?:[.\-/](\d{2,4}))?\b")
+_TIME_HM = re.compile(r"\b([01]?\d|2[0-3])[:.](\d{2})\b")
+
+
+def parse_datetime_from_text(text: str) -> tuple[str | None, str | None]:
+    """
+    Пытаемся вытащить date_str(YYYY-MM-DD) и time_str(HH:MM) из текста:
+    - "сегодня 10:00"
+    - "завтра 18:30"
+    - "05.01 10:00" (год берём текущий)
+    - "2026-01-15 10:00"
+    """
+    t = (text or "").lower().strip()
+    tm = _TIME_HM.search(t)
+    if not tm:
+        return None, None
+    hh, mm = tm.group(1), tm.group(2)
+    time_str = f"{int(hh):02d}:{int(mm):02d}"
+
+    today = now_local().date()
+
+    if "сегодня" in t:
+        date_str = today.strftime("%Y-%m-%d")
+        return date_str, time_str
+
+    if "завтра" in t:
+        date_str = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+        return date_str, time_str
+
+    iso = _DATE_ISO.search(t)
+    if iso:
+        y, m, d = iso.group(1), iso.group(2), iso.group(3)
+        date_str = f"{y}-{m}-{d}"
+        return date_str, time_str
+
+    dmy = _DATE_DMY.search(t)
+    if dmy:
+        d = int(dmy.group(1))
+        m = int(dmy.group(2))
+        y_raw = dmy.group(3)
+        if y_raw:
+            y = int(y_raw)
+            if y < 100:
+                y += 2000
+        else:
+            y = today.year
+        date_str = f"{y:04d}-{m:02d}-{d:02d}"
+        return date_str, time_str
+
+    # если время есть, а даты нет — вернём только время (дата None)
+    return None, time_str
+
+
+# ====== AVAILABILITY ======
 def check_slot_available(date_str: str, time_str: str, duration_minutes: int = 60) -> bool:
     start_local = _local_dt(date_str, time_str)
+    if not is_future_slot(start_local):
+        return False
     end_local = start_local + timedelta(minutes=duration_minutes)
     return is_time_available(start_local, end_local)
 
 
 def is_time_available(start_local: datetime, end_local: datetime) -> bool:
+    # Доп. защита: не ходим в Google за прошлым
+    if not is_future_slot(start_local):
+        return False
+
     body = {
         "timeMin": _to_utc_rfc3339(start_local),
         "timeMax": _to_utc_rfc3339(end_local),
@@ -57,6 +130,39 @@ def is_time_available(start_local: datetime, end_local: datetime) -> bool:
     return len(busy) == 0
 
 
+def suggest_next_free_slots(
+    start_from_local: datetime | None = None,
+    duration_minutes: int = 60,
+    step_minutes: int = 30,
+    limit: int = 5,
+    search_hours: int = 72,
+) -> list[tuple[str, str]]:
+    """
+    Ищем ближайшие свободные слоты, начиная с момента start_from_local (или now).
+    Возвращаем список (date_str, time_str).
+    """
+    if start_from_local is None:
+        start_from_local = now_local()
+
+    # стартуем с ближайшего шага (например 18:07 -> 18:30)
+    minute = start_from_local.minute
+    add = (step_minutes - (minute % step_minutes)) % step_minutes
+    cursor = start_from_local.replace(second=0, microsecond=0) + timedelta(minutes=add)
+
+    found: list[tuple[str, str]] = []
+    end_search = cursor + timedelta(hours=search_hours)
+
+    while cursor < end_search and len(found) < limit:
+        date_str = cursor.strftime("%Y-%m-%d")
+        time_str = cursor.strftime("%H:%M")
+        if check_slot_available(date_str, time_str, duration_minutes=duration_minutes):
+            found.append((date_str, time_str))
+        cursor += timedelta(minutes=step_minutes)
+
+    return found
+
+
+# ====== CREATE BOOKING ======
 def create_booking(
     name: str,
     phone: str,
@@ -66,6 +172,11 @@ def create_booking(
     duration_minutes: int = 60,
 ):
     start_local = _local_dt(date_str, time_str)
+
+    # 🔒 Запрещаем прошлое
+    if not is_future_slot(start_local):
+        return None
+
     end_local = start_local + timedelta(minutes=duration_minutes)
 
     # 🔒 Проверка занятости (ещё раз)
@@ -95,3 +206,4 @@ def create_booking(
     ).execute()
 
     return created_event.get("htmlLink")
+
