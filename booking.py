@@ -68,46 +68,68 @@ def parse_datetime_from_text(text: str) -> tuple[str | None, str | None]:
     tm = _TIME_HM.search(t)
     if not tm:
         return None, None
+
     hh, mm = tm.group(1), tm.group(2)
     time_str = f"{int(hh):02d}:{int(mm):02d}"
+    time_span = tm.span()
 
     today = now_local().date()
 
     if "сегодня" in t:
-        date_str = today.strftime("%Y-%m-%d")
-        return date_str, time_str
+        return today.strftime("%Y-%m-%d"), time_str
 
     if "завтра" in t:
-        date_str = (today + timedelta(days=1)).strftime("%Y-%m-%d")
-        return date_str, time_str
+        return (today + timedelta(days=1)).strftime("%Y-%m-%d"), time_str
 
+    # ISO YYYY-MM-DD
     iso = _DATE_ISO.search(t)
     if iso:
-        y, m, d = iso.group(1), iso.group(2), iso.group(3)
-        date_str = f"{y}-{m}-{d}"
-        return date_str, time_str
+        y, m, d = int(iso.group(1)), int(iso.group(2)), int(iso.group(3))
+        try:
+            datetime(y, m, d)  # валидация
+            return f"{y:04d}-{m:02d}-{d:02d}", time_str
+        except ValueError:
+            # если вдруг плохая дата — игнорируем
+            pass
 
-    dmy = _DATE_DMY.search(t)
-    if dmy:
-        d = int(dmy.group(1))
-        m = int(dmy.group(2))
-        y_raw = dmy.group(3)
+    # DMY: ищем ТОЛЬКО такие совпадения, которые НЕ перекрывают найденное время,
+    # иначе "18.30" (время) будет ошибочно считаться датой.
+    for mobj in _DATE_DMY.finditer(t):
+        s, e = mobj.span()
+        # перекрывается со временем? пропускаем
+        if not (e <= time_span[0] or s >= time_span[1]):
+            continue
+
+        d = int(mobj.group(1))
+        m = int(mobj.group(2))
+        y_raw = mobj.group(3)
+
         if y_raw:
             y = int(y_raw)
             if y < 100:
                 y += 2000
         else:
             y = today.year
-        date_str = f"{y:04d}-{m:02d}-{d:02d}"
-        return date_str, time_str
 
-    # если время есть, а даты нет — вернём только время (дата None)
+        try:
+            datetime(y, m, d)  # валидация
+            return f"{y:04d}-{m:02d}-{d:02d}", time_str
+        except ValueError:
+            # например 2026-30-18 — просто пропустим и попробуем следующее совпадение
+            continue
+
+    # время есть, даты нет — вернём только время
     return None, time_str
+
 
 
 # ====== AVAILABILITY ======
 def check_slot_available(date_str: str, time_str: str, duration_minutes: int = 60) -> bool:
-    start_local = _local_dt(date_str, time_str)
+    try:
+        start_local = _local_dt(date_str, time_str)
+    except ValueError:
+        return False
+
     if not is_future_slot(start_local):
         return False
     end_local = start_local + timedelta(minutes=duration_minutes)
@@ -171,7 +193,11 @@ def create_booking(
     time_str: str,
     duration_minutes: int = 60,
 ):
-    start_local = _local_dt(date_str, time_str)
+    try:
+        start_local = _local_dt(date_str, time_str)
+    except ValueError:
+        return None
+
 
     # 🔒 Запрещаем прошлое
     if not is_future_slot(start_local):
