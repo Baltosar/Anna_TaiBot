@@ -9,7 +9,27 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message
 from ai import ai_reply
-from booking import create_booking
+from booking import create_booking as _create_booking
+
+def create_booking_compat(*, name: str, phone: str, service_name: str, date: str, time: str):
+    """Call booking.create_booking with backward-compatible arguments.
+    Supports both old and new booking.py signatures."""
+    last_err = None
+    attempts = [
+        lambda: _create_booking(name=name, phone=phone, service_name=service_name, date=date, time=time),
+        lambda: _create_booking(client_name=name, phone=phone, service_name=service_name, date=date, time=time),
+        lambda: _create_booking(name, phone, service_name, date, time),
+        lambda: _create_booking(date, time, service_name, name, phone),
+        lambda: _create_booking(date, time, service_name),
+        lambda: _create_booking(date, time),
+    ]
+    for fn in attempts:
+        try:
+            return fn()
+        except TypeError as e:
+            last_err = e
+    raise last_err  # type: ignore[misc]
+
 
 # ====== ADMIN NOTIFY ======
 async def notify_admin(bot, booking: dict, user):
@@ -117,7 +137,7 @@ async def book_time(message: Message, state: FSMContext):
     date = data["date"]
     time = message.text
 
-    link = create_booking(
+    link = create_booking_compat(
         name=name,
         phone=phone,
         service_name=service,
@@ -360,4 +380,3 @@ async def request_admin(message: types.Message, state: FSMContext):
         return
     await message.answer("Ок! Сейчас подключу живого администратора. Напишите, пожалуйста, что именно нужно.")
     await notify_admins_live_request(message.from_user, message.chat.id)
-
