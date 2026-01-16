@@ -1,6 +1,11 @@
 import asyncio
 import os
 import logging
+import re
+from datetime import datetime, timedelta
+from typing import Optional
+
+from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandStart
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
@@ -10,6 +15,49 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message
 from ai import ai_reply
 from booking import create_booking as _create_booking
+
+TZ = ZoneInfo("Europe/Moscow")
+
+DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+DATE_DDMM_RE = re.compile(r"^(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?$")
+TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+
+def _normalize_date(text: str) -> Optional[str]:
+    t = (text or "").strip().lower()
+    if t in {"today", "сегодня"}:
+        return datetime.now(TZ).date().isoformat()
+    if t in {"tomorrow", "завтра"}:
+        return (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+
+    m = DATE_RE.match(t)
+    if m:
+        try:
+            d = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), tzinfo=TZ).date()
+            return d.isoformat()
+        except ValueError:
+            return None
+
+    m = DATE_DDMM_RE.match(t)
+    if m:
+        day = int(m.group(1))
+        month = int(m.group(2))
+        year = int(m.group(3) or datetime.now(TZ).year)
+        try:
+            d = datetime(year, month, day, tzinfo=TZ).date()
+            return d.isoformat()
+        except ValueError:
+            return None
+
+    return None
+
+
+def _is_future_slot(date_str: str, time_str: str, *, grace_minutes: int = 5) -> bool:
+    try:
+        dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
+    except ValueError:
+        return False
+    return dt > datetime.now(TZ) + timedelta(minutes=grace_minutes)
 
 def create_booking_compat(*, name: str, phone: str, service_name: str, date: str, time: str):
     """Call booking.create_booking with backward-compatible arguments.
@@ -123,7 +171,15 @@ async def book_service(message: types.Message, state: FSMContext):
 
 @dp.message(BookingState.date)
 async def book_date(message: Message, state: FSMContext):
-    await state.update_data(date=message.text)
+    norm = _normalize_date(message.text)
+    if not norm:
+        await message.answer(
+            "Не понял дату 😕\n"
+            "Напишите так: <b>2026-01-20</b> или <b>20.01</b> или <b>сегодня/завтра</b>."
+        )
+        return
+
+    await state.update_data(date=norm)
     await message.answer("Время записи? (например 14:00)")
     await state.set_state(BookingState.time)
 
@@ -135,15 +191,58 @@ async def book_time(message: Message, state: FSMContext):
     phone = data["phone"]
     service = data["service"]
     date = data["date"]
-    time = message.text
+    time = (message.text or "").strip()
 
-    link = create_booking_compat(
-        name=name,
-        phone=phone,
-        service_name=service,
-        date=date,
-        time=time
-    )
+    if not TIME_RE.match(time):
+        await message.answer(
+            "Не понял время 😕\n"
+            "Напишите в формате <b>HH:MM</b>, например <b>18:30</b>."
+        )
+        return
+
+    # Запрещаем запись в прошлое (учитываем небольшую "форточку" в 5 минут)
+    try:
+        start_dt = _local_dt(date, time)
+    except Exception:
+        await message.answer(
+            "Не смог распознать дату/время 😕\n"
+            "Попробуйте так: <b>2026-01-20</b> и <b>18:30</b>."
+        )
+        return
+
+    now = datetime.now(TZ)
+    if start_dt <= now + timedelta(minutes=5):
+        # Подсказать ближайшие свободные слоты
+        suggestions = _suggest_next_free_slots(now + timedelta(minutes=15), days=7, step_minutes=30, limit=4)
+        if suggestions:
+            pretty = "\n".join([f"• {d} {t}" for d, t in suggestions])
+            await message.answer(
+                "На это время уже поздно — запись возможна только в будущее.\n\n"
+                "Ближайшие доступные слоты:\n" + pretty + "\n\n"
+                "Выберите один вариант и напишите время (например: <b>18:30</b>) или дату и время."
+            )
+        else:
+            await message.answer(
+                "На это время уже поздно — запись возможна только в будущее.\n"
+                "Напишите другую дату и время."
+            )
+        return
+
+    try:
+        link = create_booking_compat(
+            name=name,
+            phone=phone,
+            service_name=service,
+            date=date,
+            time=time,
+        )
+    except ValueError:
+        # Если вдруг сюда прилетит не дата/время — не падаем
+        await message.answer(
+            "Не смог записать: похоже, дата/время указаны неверно.\n"
+            "Напишите дату и время, например: <b>2026-01-20 18:30</b>."
+        )
+        return
 
     if not link:
         await message.answer("❌ Это время уже занято. Пожалуйста, выберите другое.")
