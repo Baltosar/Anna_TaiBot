@@ -23,8 +23,26 @@ from aiogram.types import (
 )
 
 # Local modules in your project
-from booking import create_booking, is_time_available
+import booking as booking_mod
 from ai import ai_reply
+
+# booking.py compatibility
+# Different versions of booking.py expose different helper names.
+# We normalize to two call sites:
+#   - create_booking(name, phone, service_name, date, time) -> link
+#   - is_time_available(date_str, time_str, duration_min=60) -> bool
+create_booking = getattr(booking_mod, "create_booking")
+
+
+def is_time_available(date_str: str, time_str: str, duration_min: int = 60) -> bool:
+    if hasattr(booking_mod, "check_slot_available"):
+        return bool(booking_mod.check_slot_available(date_str=date_str, time_str=time_str, duration_minutes=duration_min))
+    if hasattr(booking_mod, "is_time_available"):
+        # legacy signature
+        return bool(booking_mod.is_time_available(date_str=date_str, time_str=time_str))
+    # Fallback: if no availability checker exists, allow and rely on create_booking()
+    return True
+
 
 # -------------------------
 # Config
