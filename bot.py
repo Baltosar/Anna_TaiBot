@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, time as dtime
 from typing import Dict, List, Optional, Tuple
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import SkipHandler
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
@@ -704,10 +705,15 @@ async def admin_reply_to_forward(message: Message):
     if admin_id not in ADMIN_CHAT_IDS:
         return
 
+    # IMPORTANT:
+    # This handler should ONLY catch replies to messages that were forwarded by the bot
+    # (i.e., when we have a mapping in FORWARDED_MAP). Otherwise it will "eat" the first
+    # admin message in the live-reply flow (admin replies to the bot prompt) and the FSM
+    # handler won't receive it.
     key = (admin_id, message.reply_to_message.message_id)
     chat_id = FORWARDED_MAP.get(key)
     if not chat_id:
-        return
+        raise SkipHandler
 
     try:
         await bot.send_message(chat_id, f"👩‍💼 Администратор: {message.text}")
@@ -805,7 +811,7 @@ async def cb_admin_end_chat(callback: CallbackQuery, state: FSMContext):
 
     # If this admin was in reply-mode, exit it (so next messages don't get stuck)
     try:
-        if await state.get_state() == AdminReplyFSM.waiting_message.state:
+        if await state.get_state() == AdminReplyFSM.waiting_text.state:
             await state.clear()
     except Exception:
         # best-effort; don't block chat closing
