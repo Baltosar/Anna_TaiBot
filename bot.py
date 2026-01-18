@@ -5,7 +5,7 @@ import os
 import re
 import secrets
 from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta, time as dtime
+from datetime import datetime, timedelta, time as dtime, date
 from typing import Dict, List, Optional, Tuple
 
 from aiogram import Bot, Dispatcher, F
