@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, time as dtime
 from typing import Dict, List, Optional, Tuple
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.dispatcher.event.handler import SkipHandler
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
@@ -697,22 +698,32 @@ async def cmd_ai(message: Message):
         await message.answer("Вы уже в режиме AI.", reply_markup=kb_client())
 
 
-@dp.message(F.reply_to_message)
+@dp.message(
+    F.reply_to_message,
+    F.from_user.id.in_(ADMIN_CHAT_IDS)
+)
 async def admin_reply_to_forward(message: Message):
-    """Admin can reply to a bot-sent message, and bot forwards reply to the user."""
-    admin_id = message.from_user.id
-    if admin_id not in ADMIN_CHAT_IDS:
+    replied = message.reply_to_message
+
+    # ⚠️ Если это НЕ ответ на пересланное сообщение клиента — просто выходим
+    if not replied or replied.message_id not in FORWARDED_MAP:
         return
 
-    key = (admin_id, message.reply_to_message.message_id)
-    chat_id = FORWARDED_MAP.get(key)
-    if not chat_id:
-        return  # ← Just return instead of raising SkipHandler
+    target_chat_id = FORWARDED_MAP[replied.message_id]
+
+    text = (message.text or "").strip()
+    if not text:
+        return
 
     try:
-        await bot.send_message(chat_id, f"👩‍💼 Администратор: {message.text}")
+        await bot.send_message(
+            target_chat_id,
+            f"👩‍💼 Администратор:\n{text}"
+        )
+        await message.answer("✅ Сообщение отправлено клиенту.")
     except Exception:
-        pass
+        await message.answer("❗ Не удалось отправить сообщение клиенту.")
+
 
 
 @dp.callback_query(F.data.startswith("admin:replyto:"))
