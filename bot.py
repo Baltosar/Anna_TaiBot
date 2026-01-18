@@ -697,31 +697,28 @@ async def cmd_ai(message: Message):
         await message.answer("Вы уже в режиме AI.", reply_markup=kb_client())
 
 
-@dp.message(
-    F.reply_to_message,
-    F.from_user.id.in_(ADMIN_CHAT_IDS)
-)
-async def admin_reply_to_forward(message: Message):
-    replied = message.reply_to_message
-
-    # ⚠️ Если это НЕ ответ на пересланное сообщение клиента — просто выходим
-    if not replied or replied.message_id not in FORWARDED_MAP:
+@dp.message(F.reply_to_message)
+async def admin_reply_to_forward(message: Message, state: FSMContext):
+    """Admin can reply to a bot-sent message, and bot forwards reply to the user."""
+    admin_id = message.from_user.id
+    if admin_id not in ADMIN_CHAT_IDS:
         return
 
-    target_chat_id = FORWARDED_MAP[replied.message_id]
+    # If admin is in FSM (actively replying), let that handler process it
+    current_state = await state.get_state()
+    if current_state == AdminReplyFSM.waiting_text.state:
+        return
 
-    text = (message.text or "").strip()
-    if not text:
+    # Only process if this is a reply to a forwarded client message
+    key = (admin_id, message.reply_to_message.message_id)
+    chat_id = FORWARDED_MAP.get(key)
+    if not chat_id:
         return
 
     try:
-        await bot.send_message(
-            target_chat_id,
-            f"👩‍💼 Администратор:\n{text}"
-        )
-        await message.answer("✅ Сообщение отправлено клиенту.")
+        await bot.send_message(chat_id, f"👩‍💼 Администратор: {message.text}")
     except Exception:
-        await message.answer("❗ Не удалось отправить сообщение клиенту.")
+        pass
 
 
 
