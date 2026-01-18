@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -145,77 +145,103 @@ def now_local() -> datetime:
     return datetime.now(tz=TZ)
 
 
-def parse_date_time_ru(text: str, *, reference: Optional[datetime] = None) -> Optional[Tuple[str, str]]:
-    """Try to extract (date_str YYYY-MM-DD, time_str HH:MM) from free text in Russian.
+def _parse_time_ru(text: str) -> Optional[str]:
+    """Extract HH:MM from text. Accepts 18:30 or 18.30."""
+    m = re.search(r"\b([01]?\d|2[0-3])[:\.](\d{2})\b", text)
+    if not m:
+        return None
+    hh = int(m.group(1))
+    mm = int(m.group(2))
+    if 0 <= hh <= 23 and 0 <= mm <= 59:
+        return f"{hh:02d}:{mm:02d}"
+    return None
+
+
+def _normalize_year(y_raw: Optional[str], reference: datetime, *, day: int, month: int) -> int:
+    """If year is missing, assume current year, but if that date is in the past -> next year."""
+    if y_raw:
+        y = int(y_raw)
+        if y < 100:
+            y += 2000
+        return y
+
+    y = reference.year
+    try:
+        candidate = date(y, month, day)
+    except ValueError:
+        return y
+    if candidate < reference.date():
+        return y + 1
+    return y
+
+
+def parse_date_time_ru(
+    text: str, *, reference: Optional[datetime] = None
+) -> Optional[Tuple[str, Optional[str]]]:
+    """Try to extract (date_str YYYY-MM-DD, time_str HH:MM|None) from free text in Russian.
 
     Supports:
-      - "2026-01-17 17:00"
-      - "17.01 17:00" (assumes current year)
-      - "сегодня 10:00", "завтра 18:30"
-      - "17:00" (assumes today)
+      - "2026-01-17 17:00" (ISO)
+      - "17.01", "17.01.26", "17.01.2026" (date only)
+      - "17.01 17:00" or "17/01/26 17:00" (date + time)
+      - "сегодня 10:00", "завтра 18:30", "послезавтра 19:00"
+      - "17:00" (time only -> today)
 
-    Returns None if can't.
+    Returns None if can't parse anything.
     """
     if reference is None:
         reference = now_local()
 
-    t = text.strip().lower()
+    t = (text or "").strip().lower()
+    if not t:
+        return None
 
-    # 1) ISO-like date
-    m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})", t)
+    # 1) ISO-like: YYYY-MM-DD [HH:MM]
+    m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})(?:\s+([01]?\d|2[0-3])[:\.](\d{2}))?", t)
     if m:
-        y, mo, d, hh, mm = map(int, m.groups())
-        try:
-            dt = datetime(y, mo, d, hh, mm, tzinfo=reference.tzinfo)
-            return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
-        except ValueError:
-            return None
-
-    # 2) dd.mm[.yyyy] + time
-    m = re.search(r"(\d{1,2})[\./-](\d{1,2})(?:[\./-](\d{2,4}))?\s+(\d{1,2}):(\d{2})", t)
-    if m:
-        d, mo, y_raw, hh, mm = m.groups()
-        d = int(d)
+        y, mo, d, hh, mm = m.groups()
+        y = int(y)
         mo = int(mo)
-        hh = int(hh)
-        mm = int(mm)
-        if y_raw:
-            y = int(y_raw)
-            if y < 100:
-                y += 2000
-        else:
-            y = reference.year
+        d = int(d)
+        time_str = None
+        if hh is not None and mm is not None:
+            time_str = f"{int(hh):02d}:{int(mm):02d}"
         try:
-            dt = datetime(y, mo, d, hh, mm, tzinfo=reference.tzinfo)
-            return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
+            _ = date(y, mo, d)
+            return f"{y:04d}-{mo:02d}-{d:02d}", time_str
         except ValueError:
             return None
 
-    # 3) today/tomorrow + time
-    m = re.search(r"\b(сегодня|завтра)\b[^\d]*(\d{1,2}):(\d{2})", t)
+    # 2) today/tomorrow/after tomorrow
+    m = re.search(r"\b(сегодня|завтра|послезавтра)\b", t)
     if m:
-        day_word, hh, mm = m.groups()
-        hh = int(hh)
-        mm = int(mm)
+        day_word = m.group(1)
         base = reference.date()
         if day_word == "завтра":
             base = (reference + timedelta(days=1)).date()
+        elif day_word == "послезавтра":
+            base = (reference + timedelta(days=2)).date()
+
+        time_str = _parse_time_ru(t)
+        return base.strftime("%Y-%m-%d"), time_str
+
+    # 3) dd.mm[.yyyy] with optional time
+    m = re.search(r"\b(\d{1,2})[\./-](\d{1,2})(?:[\./-](\d{2,4}))?\b", t)
+    if m:
+        d = int(m.group(1))
+        mo = int(m.group(2))
+        y = _normalize_year(m.group(3), reference, day=d, month=mo)
+        time_str = _parse_time_ru(t)
         try:
-            dt = datetime.combine(base, dtime(hh, mm), tzinfo=reference.tzinfo)
-            return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
+            _ = date(y, mo, d)
+            return f"{y:04d}-{mo:02d}-{d:02d}", time_str
         except ValueError:
             return None
 
     # 4) time only -> today
-    m = re.search(r"\b(\d{1,2}):(\d{2})\b", t)
-    if m:
-        hh = int(m.group(1))
-        mm = int(m.group(2))
-        try:
-            dt = datetime.combine(reference.date(), dtime(hh, mm), tzinfo=reference.tzinfo)
-            return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
-        except ValueError:
-            return None
+    time_str = _parse_time_ru(t)
+    if time_str:
+        return reference.date().strftime("%Y-%m-%d"), time_str
 
     return None
 
@@ -491,17 +517,50 @@ async def fsm_phone(message: Message, state: FSMContext):
 
 @dp.message(BookingFSM.datetime)
 async def fsm_datetime(message: Message, state: FSMContext):
-    parsed = parse_date_time_ru(message.text)
-    if not parsed:
-        slots = suggest_slots(limit=6)
+    text = (message.text or "").strip()
+    data = await state.get_data()
+
+    # If user already provided a date (without time), allow next message to contain only time.
+    pending_date = data.get("pending_date_str")
+    if pending_date:
+        t = _parse_time_ru(text)
+        if t:
+            date_str, time_str = pending_date, t
+        else:
+            parsed = parse_date_time_ru(text)
+            if not parsed:
+                slots = suggest_slots(limit=6)
+                await message.answer(
+                    "Не понял время.\n"
+                    "Напишите, например: <code>18:30</code>.\n\n"
+                    f"Ближайшие свободные слоты: {format_slots(slots)}"
+                )
+                return
+            date_str, time_str = parsed
+    else:
+        parsed = parse_date_time_ru(text)
+        if not parsed:
+            slots = suggest_slots(limit=6)
+            await message.answer(
+                "Не понял дату/время.\n"
+                "Напишите, например: <code>17.01 18:30</code> или <code>завтра 18:30</code>.\n\n"
+                f"Ближайшие свободные слоты: {format_slots(slots)}"
+            )
+            return
+        date_str, time_str = parsed
+
+    # If user sent only a date — ask for time.
+    if not time_str:
+        await state.update_data(pending_date_str=date_str)
         await message.answer(
-            "Не понял дату/время.\n"
-            "Напишите, например: <code>17.01 18:30</code> или <code>завтра 18:30</code>.\n\n"
-            f"Ближайшие свободные слоты: {format_slots(slots)}"
+            f"Отлично. На какую <b>время</b> записать {date_str}?\n"
+            "Напишите, например: <code>18:30</code>."
         )
         return
 
-    date_str, time_str = parsed
+    # clear pending date if it was set
+    if pending_date:
+        await state.update_data(pending_date_str=None)
 
     # past protection: forbid if already started (grace 0) - user asked "10:05" should forbid "10:00"
     if not is_future_slot(date_str, time_str, grace_minutes=0):
@@ -697,36 +756,22 @@ async def cmd_ai(message: Message):
         await message.answer("Вы уже в режиме AI.", reply_markup=kb_client())
 
 
-@dp.message(AdminReplyFSM.waiting_text)
-async def admin_send_to_client(message: Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_CHAT_IDS:
+@dp.message(F.reply_to_message, ~StateFilter(AdminReplyFSM.waiting_text))
+async def admin_reply_to_forward(message: Message):
+    """Admin can reply to a bot-sent message, and bot forwards reply to the user."""
+    admin_id = message.from_user.id
+    if admin_id not in ADMIN_CHAT_IDS:
         return
 
-    data = await state.get_data()
-    chat_id = data.get("target_chat_id")
-
+    key = (admin_id, message.reply_to_message.message_id)
+    chat_id = FORWARDED_MAP.get(key)
     if not chat_id:
-        await message.answer("❗ Клиент не выбран.")
-        await state.clear()
-        return
-
-    text = (message.text or "").strip()
-    if not text:
         return
 
     try:
-        await bot.send_message(
-            int(chat_id),
-            f"👩‍💼 Администратор:\n{text}"
-        )
-        await message.answer("✅ Отправлено клиенту.")
+        await bot.send_message(chat_id, f"👩‍💼 Администратор: {message.text}")
     except Exception:
-        await message.answer("❗ Не удалось отправить клиенту.")
-    finally:
-        # 🔥 ВАЖНЕЙШАЯ СТРОКА
-        await state.clear()
-
-
+        pass
 
 
 @dp.callback_query(F.data.startswith("admin:replyto:"))
@@ -939,8 +984,8 @@ async def handle_message(message: Message, state: FSMContext):
 
     # If message looks like booking intent with date/time -> start quick booking
     parsed = parse_date_time_ru(text)
-    if parsed:
-        date_str, time_str = parsed
+    if parsed and parsed[1]:
+        date_str, time_str = parsed  # type: ignore[assignment]
 
         if not is_future_slot(date_str, time_str, grace_minutes=0):
             slots = suggest_slots(limit=6)
