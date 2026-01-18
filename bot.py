@@ -20,6 +20,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    ForceReply,
 )
 
 # Local modules in your project
@@ -32,6 +33,53 @@ from ai import ai_reply
 #   - create_booking(name, phone, service_name, date, time) -> link
 #   - is_time_available(date_str, time_str, duration_min=60) -> bool
 create_booking = getattr(booking_mod, "create_booking")
+
+
+def create_booking_compat(
+    *,
+    client_name: str,
+    phone: str,
+    service_name: str,
+    date_str: str,
+    time_str: str,
+    duration_min: int = 60,
+    comment: str = "",
+):
+    """Call booking.create_booking with whatever signature is implemented in booking.py.
+
+    Your booking.py currently expects:
+        create_booking(date_str, time_str, service_name, client_name, phone, duration_minutes=..., comment=...)
+    But older bot versions called it with different keyword names.
+    """
+
+    # First: try the expected new signature (booking_v2.py / current booking.py)
+    try:
+        return create_booking(
+            date_str=date_str,
+            time_str=time_str,
+            service_name=service_name,
+            client_name=client_name,
+            phone=phone,
+            duration_minutes=int(duration_min),
+            comment=comment or "",
+        )
+    except TypeError:
+        pass
+
+    # Fallbacks for older signatures (just in case)
+    try:
+        return create_booking(
+            date=date_str,
+            time=time_str,
+            service=service_name,
+            name=client_name,
+            phone=phone,
+            duration=int(duration_min),
+            comment=comment or "",
+        )
+    except TypeError:
+        # Last resort: positional
+        return create_booking(date_str, time_str, service_name, client_name, phone, int(duration_min), comment or "")
 
 
 def is_time_available(date_str: str, time_str: str, duration_min: int = 60) -> bool:
@@ -261,6 +309,77 @@ LIVE_ADMIN: Dict[int, int] = {}
 # forwarded admin message map: (admin_id, msg_id) -> user_chat_id
 FORWARDED_MAP: Dict[Tuple[int, int], int] = {}
 
+
+def admin_chat_kb(client_chat_id: int) -> InlineKeyboardMarkup:
+    """Inline keyboard shown to admins under each client message."""
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✍️ Ответить", callback_data=f"admin:replyto:{client_chat_id}"
+                ),
+                InlineKeyboardButton(
+                    text="✅ Завершить чат", callback_data=f"admin:endchat:{client_chat_id}"
+                ),
+            ]
+        ]
+    )
+
+
+@dp.callback_query(F.data.startswith("admin:endchat:"))
+async def cb_admin_end_chat(callback: CallbackQuery, state: FSMContext):
+    """Finish live admin chat for a specific client (button ✅ Завершить чат)."""
+    if callback.from_user.id not in ADMIN_CHAT_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    try:
+        client_chat_id = int(callback.data.split(":", 2)[2])
+    except Exception:
+        await callback.answer("Ошибка данных", show_alert=True)
+        return
+
+    # Close live-admin mode
+    removed_admin = LIVE_ADMIN.pop(client_chat_id, None)
+
+    # UI feedback
+    await callback.answer("Чат завершён")
+
+    # If this admin was in reply-mode, exit it (so next messages don't get stuck)
+    try:
+        if await state.get_state() == AdminReplyFSM.waiting_message.state:
+            await state.clear()
+    except Exception:
+        # best-effort; don't block chat closing
+        pass
+
+    # Notify client: AI is back automatically because LIVE_ADMIN entry is removed
+    try:
+        await bot.send_message(
+            client_chat_id,
+            "✅ Чат с администратором завершён.\n\nТеперь снова отвечает AI-ассистент — можете писать вопрос или /book для записи.",
+        )
+    except Exception:
+        pass
+
+    # Notify admins (including who ended it)
+    note = (
+        f"✅ Завершён чат с клиентом {client_chat_id}. "
+        f"Завершил админ {callback.from_user.id}."
+    )
+    for admin_id in ADMIN_CHAT_IDS:
+        try:
+            await bot.send_message(admin_id, note)
+        except Exception:
+            pass
+
+    # Try to remove buttons from the message where it was pressed
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
 # round-robin admin selection
 _admin_rr_idx = 0
 
@@ -285,6 +404,16 @@ def kb_client() -> InlineKeyboardMarkup:
     )
 
 
+def kb_client_live_admin() -> InlineKeyboardMarkup:
+    """Client keyboard while in live-admin mode."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Завершить чат", callback_data="client:endchat")],
+            [InlineKeyboardButton(text="📅 Записаться", callback_data="client:book")],
+        ]
+    )
+
+
 def kb_admin_actions(req_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -305,6 +434,10 @@ class BookingFSM(StatesGroup):
     phone = State()
     datetime = State()
     comment = State()
+
+
+class AdminReplyFSM(StatesGroup):
+    waiting_text = State()
 
 
 # -------------------------
@@ -361,18 +494,24 @@ async def cb_admin(callback: CallbackQuery):
         try:
             msg = await bot.send_message(
                 aid,
-                f"📨 Клиент просит администратора.\n"
-                f"User: <code>{user_id}</code>\n"
-                f"Chat: <code>{callback.message.chat.id}</code>\n"
-                f"Вы назначены: {'✅' if aid == admin_id else '—'}",
+                (
+                    f"📨 Клиент просит администратора.\n"
+                    f"User: <code>{user_id}</code>\n"
+                    f"Chat: <code>{callback.message.chat.id}</code>\n"
+                    f"Вы назначены: {'✅' if aid == admin_id else '—'}\n\n"
+                    f"Нажмите <b>✍️ Ответить</b> ниже и напишите сообщение — я отправлю клиенту.\n"
+                    f"(Можно также <i>ответить реплаем</i> на любое сообщение клиента.)"
+                ),
+                reply_markup=admin_chat_kb(callback.message.chat.id),
             )
             FORWARDED_MAP[(aid, msg.message_id)] = callback.message.chat.id
         except Exception:
             pass
 
     await callback.message.answer(
-        "Хорошо, сейчас подключу администратора. Пишите ваш вопрос — я передам.",
-        reply_markup=kb_client(),
+        "Хорошо, подключаю администратора. Пишите ваш вопрос — я передам.\n\n"
+        "Чтобы закончить чат, нажмите «✅ Завершить чат». После завершения я (AI) снова буду отвечать автоматически.",
+        reply_markup=kb_client_live_admin(),
     )
 
 
@@ -528,28 +667,16 @@ async def admin_confirm(callback: CallbackQuery):
         )
         return
 
-    # Create calendar event
-    # booking.py in your project uses signature:
-    #   create_booking(service, date, time, name, phone, duration=60)
-    # but earlier experiments used other orders; keep safe fallback.
-    try:
-        link = create_booking(
-            req.service_name,
-            req.date_str,
-            req.time_str,
-            req.client_name,
-            req.phone,
-            duration=req.duration_min,
-        )
-    except TypeError:
-        # Fallback (older signature variations)
-        link = create_booking(
-            req.client_name,
-            req.phone,
-            req.service_name,
-            req.date_str,
-            req.time_str,
-        )
+    # Create calendar event (signature differs between revisions of booking.py)
+    link = create_booking_compat(
+        client_name=req.client_name,
+        phone=req.phone,
+        service_name=req.service_name,
+        date_str=req.date_str,
+        time_str=req.time_str,
+        duration_min=req.duration_min,
+        comment=req.comment,
+    )
 
     req.status = "CONFIRMED"
     req.confirmed_by = admin_id
@@ -641,6 +768,129 @@ async def admin_reply_to_forward(message: Message):
         pass
 
 
+@dp.callback_query(F.data.startswith("admin:replyto:"))
+async def admin_pick_chat(callback: CallbackQuery, state: FSMContext):
+    """Let admin select a client chat to reply to (without requiring Reply-to)."""
+
+    if callback.from_user.id not in ADMIN_CHAT_IDS:
+        await callback.answer()
+        return
+
+    try:
+        chat_id = int((callback.data or "").split(":")[-1])
+    except Exception:
+        await callback.answer("Не смог определить чат.")
+        return
+
+    await state.set_state(AdminReplyFSM.waiting_text)
+    await state.update_data(target_chat_id=chat_id)
+    await callback.answer("Ок")
+    await callback.message.answer(
+        f"✍️ Напишите ответ клиенту (chat_id: <code>{chat_id}</code>).\n"
+        f"Чтобы закончить, отправьте /end.",
+        reply_markup=ForceReply(selective=True),
+    )
+
+
+@dp.message(Command("end"), F.from_user.id.in_(ADMIN_CHAT_IDS))
+async def admin_end_session(message: Message, state: FSMContext):
+    """Admin ends the current reply session (and also closes live chat for that client, if active)."""
+    data = await state.get_data()
+    target_chat_id = data.get("target_chat_id")
+    await state.clear()
+
+    # If this admin was chatting live with a client, close it.
+    if isinstance(target_chat_id, int) and LIVE_ADMIN.get(target_chat_id) == message.from_user.id:
+        LIVE_ADMIN.pop(target_chat_id, None)
+        try:
+            await bot.send_message(
+                target_chat_id,
+                "✅ Чат с администратором завершён. Я снова на связи (AI) — можете продолжить диалог или записаться.",
+                reply_markup=kb_client(),
+            )
+        except Exception:
+            pass
+
+    await message.answer("✅ Диалог завершён.")
+
+
+@dp.message(Command("end"))
+async def client_end_session(message: Message, state: FSMContext):
+    """Client ends live-admin chat and returns to AI."""
+    user_id = message.from_user.id
+    if user_id not in LIVE_ADMIN:
+        return
+
+    admin_id = LIVE_ADMIN.pop(user_id, None)
+    await state.clear()
+
+    await message.answer(
+        "✅ Чат с администратором завершён. Я снова на связи (AI) — можете продолжить диалог или записаться.",
+        reply_markup=kb_client(),
+    )
+
+    if admin_id:
+        try:
+            await bot.send_message(admin_id, f"✅ Клиент {user_id} завершил чат.")
+        except Exception:
+            pass
+
+
+@dp.callback_query(F.data == "client:endchat")
+async def cb_client_end_chat(callback: CallbackQuery, state: FSMContext):
+    """Client ends live-admin chat via button and returns to AI."""
+    if not callback.from_user:
+        return
+
+    user_id = callback.from_user.id
+    if user_id not in LIVE_ADMIN:
+        await callback.answer("Чат уже завершён", show_alert=False)
+        return
+
+    admin_id = LIVE_ADMIN.pop(user_id, None)
+    await state.clear()
+    await callback.answer("Чат завершён")
+
+    # Notify client
+    try:
+        await callback.message.answer(
+            "✅ Чат с администратором завершён. Я снова на связи (AI) — можете продолжить диалог или записаться.",
+            reply_markup=kb_client(),
+        )
+    except Exception:
+        pass
+
+    # Notify admin (best-effort)
+    if admin_id:
+        try:
+            await bot.send_message(admin_id, f"✅ Клиент {user_id} завершил чат.")
+        except Exception:
+            pass
+
+
+@dp.message(AdminReplyFSM.waiting_text)
+async def admin_send_to_client(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_CHAT_IDS:
+        return
+
+    data = await state.get_data()
+    chat_id = data.get("target_chat_id")
+    if not chat_id:
+        await message.answer("❗ Не выбран клиент. Нажмите «✍️ Ответить» под сообщением клиента.")
+        await state.clear()
+        return
+
+    text = (message.text or "").strip()
+    if not text:
+        return
+
+    try:
+        await bot.send_message(int(chat_id), f"👩‍💼 Администратор: {text}")
+        await message.answer("✅ Отправлено клиенту.")
+    except Exception:
+        await message.answer("❗ Не смог отправить клиенту. Возможно, он заблокировал бота.")
+
+
 # -------------------------
 # Main chat handler (AI + date/time detection + live admin)
 # -------------------------
@@ -663,6 +913,7 @@ async def handle_message(message: Message, state: FSMContext):
                 msg = await bot.send_message(
                     aid,
                     f"💬 Сообщение от клиента {prefix}\nUser: <code>{user_id}</code>\n\n{text}",
+                    reply_markup=admin_chat_kb(message.chat.id),
                 )
                 FORWARDED_MAP[(aid, msg.message_id)] = message.chat.id
             except Exception:
