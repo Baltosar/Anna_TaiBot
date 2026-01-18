@@ -327,59 +327,6 @@ def admin_chat_kb(client_chat_id: int) -> InlineKeyboardMarkup:
     )
 
 
-@dp.callback_query(F.data.startswith("admin:endchat:"))
-async def cb_admin_end_chat(callback: CallbackQuery, state: FSMContext):
-    """Finish live admin chat for a specific client (button ✅ Завершить чат)."""
-    if callback.from_user.id not in ADMIN_CHAT_IDS:
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-
-    try:
-        client_chat_id = int(callback.data.split(":", 2)[2])
-    except Exception:
-        await callback.answer("Ошибка данных", show_alert=True)
-        return
-
-    # Close live-admin mode
-    removed_admin = LIVE_ADMIN.pop(client_chat_id, None)
-
-    # UI feedback
-    await callback.answer("Чат завершён")
-
-    # If this admin was in reply-mode, exit it (so next messages don't get stuck)
-    try:
-        if await state.get_state() == AdminReplyFSM.waiting_message.state:
-            await state.clear()
-    except Exception:
-        # best-effort; don't block chat closing
-        pass
-
-    # Notify client: AI is back automatically because LIVE_ADMIN entry is removed
-    try:
-        await bot.send_message(
-            client_chat_id,
-            "✅ Чат с администратором завершён.\n\nТеперь снова отвечает AI-ассистент — можете писать вопрос или /book для записи.",
-        )
-    except Exception:
-        pass
-
-    # Notify admins (including who ended it)
-    note = (
-        f"✅ Завершён чат с клиентом {client_chat_id}. "
-        f"Завершил админ {callback.from_user.id}."
-    )
-    for admin_id in ADMIN_CHAT_IDS:
-        try:
-            await bot.send_message(admin_id, note)
-        except Exception:
-            pass
-
-    # Try to remove buttons from the message where it was pressed
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-
 # round-robin admin selection
 _admin_rr_idx = 0
 
@@ -834,6 +781,61 @@ async def client_end_session(message: Message, state: FSMContext):
             await bot.send_message(admin_id, f"✅ Клиент {user_id} завершил чат.")
         except Exception:
             pass
+
+
+
+@dp.callback_query(F.data.startswith("admin:endchat:"))
+async def cb_admin_end_chat(callback: CallbackQuery, state: FSMContext):
+    """Finish live admin chat for a specific client (button ✅ Завершить чат)."""
+    if callback.from_user.id not in ADMIN_CHAT_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    try:
+        client_chat_id = int(callback.data.split(":", 2)[2])
+    except Exception:
+        await callback.answer("Ошибка данных", show_alert=True)
+        return
+
+    # Close live-admin mode
+    removed_admin = LIVE_ADMIN.pop(client_chat_id, None)
+
+    # UI feedback
+    await callback.answer("Чат завершён")
+
+    # If this admin was in reply-mode, exit it (so next messages don't get stuck)
+    try:
+        if await state.get_state() == AdminReplyFSM.waiting_message.state:
+            await state.clear()
+    except Exception:
+        # best-effort; don't block chat closing
+        pass
+
+    # Notify client: AI is back automatically because LIVE_ADMIN entry is removed
+    try:
+        await bot.send_message(
+            client_chat_id,
+            "✅ Чат с администратором завершён.\n\nТеперь снова отвечает AI-ассистент — можете писать вопрос или /book для записи.",
+        )
+    except Exception:
+        pass
+
+    # Notify admins (including who ended it)
+    note = (
+        f"✅ Завершён чат с клиентом {client_chat_id}. "
+        f"Завершил админ {callback.from_user.id}."
+    )
+    for admin_id in ADMIN_CHAT_IDS:
+        try:
+            await bot.send_message(admin_id, note)
+        except Exception:
+            pass
+
+    # Try to remove buttons from the message where it was pressed
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
 
 @dp.callback_query(F.data == "client:endchat")
