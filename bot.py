@@ -9,7 +9,6 @@ from datetime import datetime, timedelta, time as dtime
 from typing import Dict, List, Optional, Tuple
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.dispatcher.event.handler import SkipHandler
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
